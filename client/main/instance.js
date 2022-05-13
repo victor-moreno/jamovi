@@ -20,8 +20,11 @@ const I18n = require('../common/i18n');
 
 const Settings = require('./settings');
 const ProgressStream = require('./utils/progressstream');
-const JError = require('./errors').JError;
+
 const { flatten, unflatten } = require('../common/utils/addresses');
+
+const JError = require('./errors').JError;
+const CancelledError = require('./errors').CancelledError;
 
 
 const Instance = Backbone.Model.extend({
@@ -43,9 +46,6 @@ const Instance = Backbone.Model.extend({
             dataSetModel: this._dataSetModel });
 
         this._analyses.on('analysisOptionsChanged', this._runAnalysis, this);
-
-        this._settings.on('change:theme', event => this._themeChanged());
-        this._settings.on('change:palette', event => this._paletteChanged());
 
         this._instanceId = null;
 
@@ -165,19 +165,82 @@ const Instance = Backbone.Model.extend({
 
                 if (file instanceof File) {
 
-                    setProgress({ title: _('Uploading'), p: 0, n: 0 });
+                    // fetch doesn't support upload progress, so we need to use xhr
+                    let xhr = new XMLHttpRequest();
+                    xhr.responseType = 'text';  // json lines
+
+                    // create a body stream that's kinda like what the fetch api produces
+                    let stream = new ReadableStream({
+                        async start(controller) {
+                            await new Promise((resolve) => {
+                                xhr.addEventListener('progress', (event) => {
+                                    let jsonlines = xhr.responseText;
+                                    if (jsonlines) {
+                                        let pieces = jsonlines.split('\n');
+                                        // if the last piece is empty (in jsonlines this will often be the case)
+                                        // use the second last piece instead
+                                        let lastPiece = pieces[pieces.length - 1] || pieces[pieces.length - 2];
+                                        if (lastPiece)
+                                            controller.enqueue(lastPiece);
+                                    }
+                                });
+                                xhr.addEventListener('loadend', () => {
+                                    if (xhr.readyState === 0)
+                                        // aborted
+                                        controller.close();
+                                    else if (xhr.readyState === 4 && xhr.status === 200)
+                                        // great success!
+                                        controller.close();
+                                    else
+                                        // fail
+                                        controller.error(new JError(_('Upload failed'), { cause: xhr.statusText }));
+                                    resolve()
+                                }, { once: true });
+                            });
+                        }
+                    });
+
+                    setProgress({ title: _('Uploading'), p: 0, n: 0, cancel: () => xhr.abort() });
+
+                    xhr.upload.addEventListener('progress', (event) => {
+                        if (event.lengthComputable)
+                            setProgress({ title: _('Uploading'), p: event.loaded, n: event.total, cancel: () => xhr.abort() });
+                    });
 
                     let url = `${ host.baseUrl }open?p&filename=${ encodeURIComponent(file.name) }`;
                     if (options.title)
                         url += `&title=${ encodeURIComponent(options.title) }`;
 
-                    response = await fetch(url, {
-                        method: 'POST',
-                        body: file,
-                        credentials: 'include',
-                        cache: 'no-store',
-                        headers: headers
-                    });
+                    xhr.open('POST', url, true);
+                    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+                    for (let header of headers.entries())
+                        xhr.setRequestHeader(header[0], header[1]);
+                    xhr.send(file);
+
+                    // wait till upload completes
+                    await new Promise((resolve) => {
+                        xhr.addEventListener('readystatechange', (event) => {
+                            if (xhr.readyState !== XMLHttpRequest.OPENED)
+                                resolve();
+                        });
+                    })
+
+                    if (xhr.status === 0) // aborted
+                        throw new CancelledError();
+
+                    if (xhr.status === 204)
+                        return { 'status': 'OK' };
+
+                    if (xhr.status === 413)
+                        throw new JError(_('Upload failed'), { cause: 'File size exceeds session limits' });
+
+                    if (xhr.status !== 200)
+                        throw new JError(_('Upload failed'), { cause: xhr.statusText });
+
+                    // if we're here, the upload succeeded, and the opening
+                    // process comes next (which may yet fail)
+                    // we construct a response something like what the fetch() api returns
+                    response = { status: xhr.status, statusText: xhr.statusText, body: stream };
                 }
                 else {
 
@@ -201,16 +264,16 @@ const Instance = Backbone.Model.extend({
                         cache: 'no-store',
                         headers: headers
                     });
+
+                    if (response.status === 204)
+                        return { 'status': 'OK' };
+
+                    if (response.status === 413)
+                        throw new JError(_('Unable to open'), { cause: 'File size exceeds session limits' });
+
+                    if (response.status !== 200)
+                        throw new JError(_('Unable to open'), { cause: response.statusText });
                 }
-
-                if (response.status === 204)
-                    return { 'status': 'OK' };
-
-                if (response.status === 413)
-                    throw new JError(_('Unable to open'), { cause: 'File size exceeds session limits' });
-
-                if (response.status !== 200)
-                    throw new JError(_('Unable to open'), { cause: response.statusText });
 
                 const reader = response.body.getReader();
                 const utf8Decoder = new TextDecoder('utf-8');
@@ -218,19 +281,24 @@ const Instance = Backbone.Model.extend({
                 let message;
                 for (;;) {
                     let { done, value } = await reader.read();
-                    let chunk = value ? utf8Decoder.decode(value) : '';
-                    let pieces = chunk.split('\n');
 
-                    while (pieces.length > 0) {
-                        let piece = pieces.pop();
-                        if (piece) {
-                            try {
-                                message = JSON.parse(piece);
-                                break;
-                            }
-                            catch (e) {
-                                // do nothing
-                            }
+                    let pieces;
+                    if (typeof(value) === 'string')
+                        pieces = value.split('\n');
+                    else if ( ! value)
+                        pieces = [ ];
+                    else
+                        pieces = utf8Decoder.decode(value).split('\n');
+
+                    // if the last piece is empty (in jsonlines this will often be the case)
+                    // use the second last piece instead
+                    let lastPiece = pieces[pieces.length - 1] || pieces[pieces.length - 2];
+                    if (lastPiece) {
+                        try {
+                            message = JSON.parse(lastPiece);
+                        }
+                        catch(e) {
+                            message = null;
                         }
                     }
 
@@ -543,19 +611,9 @@ const Instance = Backbone.Model.extend({
     },
     trustArbitraryCode() {
         for (let analysis of this.analyses()) {
-            if ( ! analysis.enabled) {
-                analysis.enabled = true;
-                this._runAnalysis(analysis, []);
-            }
+            if ( ! analysis.enabled)
+                analysis.enable();
         }
-    },
-    _themeChanged() {
-        for (let analysis of this.analyses())
-            this._runAnalysis(analysis, 'theme');
-    },
-    _paletteChanged() {
-        for (let analysis of this.analyses())
-            this._runAnalysis(analysis, 'palette');
     },
     _notify(error) {
         let notification = new Notify({
@@ -619,13 +677,10 @@ const Instance = Backbone.Model.extend({
                     id: analysisPB.analysisId,
                     options: options,
                     results: analysisPB.results,
-                    incAsText: analysisPB.incAsText,
                     references: analysisPB.references,
                     enabled: false,
                     dependsOn: analysisPB.dependsOn,
                 });
-                if (analysis.results.status !== 3)
-                    this._runAnalysis(analysis);
 
                 allAnalysesReady.push(analysis.ready);
 
@@ -661,7 +716,6 @@ const Instance = Backbone.Model.extend({
             index: index,
             options: duplicee.options.getValues(),
             results: duplicee.results,
-            incAsText: duplicee.incAsText,
             references: duplicee.references,
         });
         this._sendAnalysis(analysis, duplicee);
@@ -800,7 +854,6 @@ const Instance = Backbone.Model.extend({
                     id: response.analysisId,
                     options: options,
                     results: response.results,
-                    incAsText: response.incAsText,
                     references: response.references,
                     enabled: response.enabled,
                     index: response.index - 1,
@@ -825,7 +878,6 @@ const Instance = Backbone.Model.extend({
                     analysis.setResults({
                         results: response.results,
                         options: options,
-                        incAsText: response.incAsText,
                         references: response.references,
                     });
             }
@@ -846,20 +898,8 @@ const Instance = Backbone.Model.extend({
         }
         else if (payloadType === 'Notification') {
 
-            this._notifs = this._notifs || { };
-            let notif = this._notifs[response.id] || new Notify();
-            this._notifs[response.id] = notif;
-
-            if (response.status !== 1) {
-                notif.set({
-                    title: response.title,
-                    message: response.message });
-                this.trigger('notification', notif);
-            }
-            else {
-                notif.dismiss();
-                delete this._notifs[response.id];
-            }
+            let n10n = Notify.createFromPB(response);
+            this.trigger('notification', n10n);
         }
         else if (payloadType === 'LogRR') {
             console.log(response.content);
@@ -882,7 +922,6 @@ const Instance = Backbone.Model.extend({
             let columnRenames = [];
             let levelRenames = [];
             let columnDeletes = [];
-            let rerunAnalysis = false;
 
             for (let changes of event.changes) {
 
@@ -890,8 +929,6 @@ const Instance = Backbone.Model.extend({
                     if (using.includes(changes.name)) {
                         columnDeleted = true;
                         columnDeletes.push(changes.name);
-                        if (changes.columnType !== 'output')
-                            rerunAnalysis = true;
                     }
                 }
                 else {
@@ -909,11 +946,9 @@ const Instance = Backbone.Model.extend({
                             changes.missingValuesChanged ||
                             changes.descriptionChanged)
                         columnDataChanged = true;
-                        rerunAnalysis = true;
                     }
                     if (changes.nameChanged && using.includes(changes.oldName)) {
                         columnRenamed = true;
-                        rerunAnalysis = true;
                         columnRenames.push({ oldName: changes.oldName, newName: column.name });
                     }
                     if (changes.levelsChanged) {
@@ -934,8 +969,6 @@ const Instance = Backbone.Model.extend({
                 let selectedAnalysis = this.get('selectedAnalysis');
                 if (selectedAnalysis !== null && selectedAnalysis.id === analysis.id)
                     this.trigger("change:selectedAnalysis", { changed: { selectedAnalysis: analysis } });
-                if (rerunAnalysis)
-                    this._runAnalysis(analysis, event.changed);
             }
         }
     },

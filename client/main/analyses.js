@@ -19,7 +19,6 @@ const Analysis = function(id, name, ns, modules) {
     this.results = null;
     this.options = null;
     this.isReady = false;
-    this.incAsText = false;
     this.references = [ ];
     this.index = -1;
     this.uijs = undefined;
@@ -77,7 +76,7 @@ Analysis.prototype.reload = async function() {
         try {
             await Promise.all([ waitForDefn, waitForSetup ]);
             let defn = await waitForDefn;
-            this.arbitraryCode = (defn.arbitraryCode === true);
+            this.arbitraryCode = (defn.arbitraryCode || defn.arbitraryCode2);
             this.missingModule = false;
             this.options.setValues(this.values);
             this.isReady = true;
@@ -107,7 +106,6 @@ Analysis.prototype.setup = function(values) {
 
 Analysis.prototype.setResults = async function(res) {
     this.results = res.results;
-    this.incAsText = res.incAsText;
     this.references = res.references;
     if (this.options)
         this.options.setValues(res.options);
@@ -142,6 +140,14 @@ Analysis.prototype.setOptions = function(values) {
             this._parent._notifyOptionsChanged(this);
     }
 };
+
+Analysis.prototype.enable = function() {
+    if (this.enabled)
+        return;
+    this.enabled = true;
+    if (this._parent !== null)
+        this._parent._notifyOptionsChanged(this);
+}
 
 Analysis.prototype.notifyColumnsRenamed = function(columnRenames) {
     for (let i = 0; i < columnRenames.length; i++)
@@ -284,7 +290,6 @@ const Analyses = Backbone.Model.extend({
 
         await analysis.setResults({
             options: options.options,
-            incAsText: options.incAsText || '',
             references: options.references || [ ],
             results: results,
         });

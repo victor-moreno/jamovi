@@ -10,7 +10,6 @@ from jamovi.core import MemoryMap
 from jamovi.core import DataSet
 
 from . import jamovi_pb2 as jcoms
-from .jamovi_pb2 import Notification
 
 from .utils import conf
 from .utils import FileEntry
@@ -104,6 +103,10 @@ class Instance:
         self._log.setLevel('DEBUG')
         self._log.addHandler(handler)
         self._data.set_log(self._log)
+
+        main_settings = self._settings.group('main')
+        main_settings.changed += self._main_settings_changed
+
 
     @property
     def id(self):
@@ -244,31 +247,9 @@ class Instance:
     def idle_since(self):
         return self._idle_since
 
-    def notify_idle(self, id, shutdown_in):
-
-        if self._coms is None:
-            return
-
-        n = Notification()
-        n.id = id
-
-        if shutdown_in is not None:
-            nearest_30secs = int(round(shutdown_in / 30) * 30)
-            if nearest_30secs >= 120:
-                description = _('This session will end in around {} minutes').format(str(nearest_30secs // 60))
-            elif nearest_30secs >= 60:
-                description = _('This session will end in around 1 minute')
-            else:
-                description = _('This session will end any moment now')
-
-            n.title = _('Idle session')
-            n.message = description
-            n.status = 2  # indefinite
-        else:
-            n.status = 1  # dismiss
-
-        self._coms.send(n)
-
+    def notify(self, notification):
+        if self._coms is not None:
+            self._coms.send(notification.as_pb())
 
     @property
     def analyses(self):
@@ -961,6 +942,7 @@ class Instance:
                     self._mm = None
                 stream.set_exception(e)
             else:
+                # success
                 if path != '' and not is_temp:
                     self._add_to_recents(path, self._data.title)
             finally:
@@ -1257,12 +1239,20 @@ class Instance:
 
         self._coms.send(response, self._instance_id)
 
+    def _main_settings_changed(self, event):
+        if 'theme' in event.data or 'palette' in event.data:
+            for analysis in self._data.analyses:
+                main_settings = self._settings.group('main')
+                analysis.options.set_value('theme', main_settings.get('theme', 'default'))
+                analysis.options.set_value('palette', main_settings.get('palette', 'default'))
+                if analysis.enabled:
+                    analysis.run()
+
     async def _on_analysis(self, request):
 
         if request.restartEngines:
             await self.session.restart_engines()
-            for analysis in self._data.analyses:
-                analysis.rerun()
+            self._data.analyses.rerun()
             return
 
         elif request.perform == jcoms.AnalysisRequest.Perform.Value('DELETE') and request.analysisId == 0:  # request to delete all analyses
@@ -1641,6 +1631,7 @@ class Instance:
             'deleted_columns': set(),
             'deleted_transforms': set(),
             'filters_changed': False,
+            'columns_renamed': { },
         }
 
         self._on_dataset_del_cols(request, response, changes)
@@ -1676,6 +1667,20 @@ class Instance:
             for transform in changes['transforms']:
                 transform_schema = response.schema.transforms.add()
                 self._populate_transform_schema(transform, transform_schema)
+
+        renamed = changes['columns_renamed']
+        changed = set()
+        changed |= set(map(lambda x: x.name, changes['columns']))
+        changed |= set(map(lambda x: x.name, changes['deleted_columns']))
+        changed |= set(map(lambda x: x.name, changes['data_changed']))
+
+        for analysis in self._data.analyses:
+            using = analysis.get_using()
+            using_and_changed = using & changed
+            if not using.isdisjoint(renamed):
+                analysis.notify_changes(using_and_changed, renamed)
+            elif using_and_changed:
+                analysis.notify_changes(using_and_changed)
 
     def _on_dataset_get(self, request, response):
         if request.incSchema:
@@ -2108,7 +2113,10 @@ class Instance:
                                 parent = self._data.get_column_by_id(column.parent_id)
                                 parent_name = parent.name
                             new_column_name = self._calc_column_name(column, parent_name, old_transform_name)
+                            old_name = column.name
                             self._apply_column_name(column, new_column_name, cols_changed, reparse)
+                            if old_name != column.name:
+                                changes['columns_renamed'][old_name] = column.name
 
                 transform.description = trans_pb.description
                 transform.colour_index = trans_pb.colourIndex
@@ -2242,6 +2250,8 @@ class Instance:
                     self._apply_column_name(column, new_column_name, cols_changed, reparse)
 
                 cols_changed.add(column)
+                if old_name != column.name:
+                    changes['columns_renamed'][old_name] = column.name
 
                 # if these things haven't changed, no need
                 # to trigger recalcs

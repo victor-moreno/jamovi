@@ -104,6 +104,7 @@ const ResultsPanel = Backbone.View.extend({
 
         this.model.settings().on('change:format',  () => this._updateAll());
         this.model.settings().on('change:devMode', () => this._updateAll());
+        this.model.settings().on('change:syntaxMode', () => this._updateAll());
         this.model.settings().on('change:refsMode', () => this._updateRefsMode());
         this.model.on('change:editState', () => this._updateEditState());
     },
@@ -325,42 +326,39 @@ const ResultsPanel = Backbone.View.extend({
     },
     _sendResults(resources) {
 
-        if (this.mode === 'rich' || resources.analysis.incAsText) {
-
-            let format;
-            try {
-                format = JSON.parse(this.model.settings().get('format'));
-                // we added .pt later
-                if ( ! ('pt' in format))
-                    format.pt = 'dp';
-            }
-            catch (e) {
-                format = {t:'sf',n:3,pt:'dp',p:3};
-            }
-
-            let analysis = resources.analysis;
-
-            let newSelected = this.model.get('selectedAnalysis');
-
-            let event = {
-                type: 'results',
-                data: {
-                    results: analysis.results,
-                    options: analysis.options ? analysis.options.getValues() : {},
-                    mode: this.mode,
-                    devMode: this.model.settings().get('devMode'),
-                    format: format,
-                    refs: this._refsTable.getNumbers(analysis.ns),
-                    refsMode: this.model.settings().getSetting('refsMode'),
-                    isEmpty: resources.isEmpty,
-                    hasTitle: resources.hasTitle,
-                    selected: newSelected === null ? null : newSelected === analysis,
-                    annotationSelected: newSelected === null ? false : newSelected.name === 'empty',
-                    editState: this.model.get('editState')
-                }
-            };
-            resources.iframe.contentWindow.postMessage(event, this.iframeUrl);
+        let format;
+        try {
+            format = JSON.parse(this.model.settings().get('format'));
+            // we added .pt later
+            if ( ! ('pt' in format))
+                format.pt = 'dp';
         }
+        catch (e) {
+            format = {t:'sf',n:3,pt:'dp',p:3};
+        }
+
+        let analysis = resources.analysis;
+
+        let newSelected = this.model.get('selectedAnalysis');
+
+        let event = {
+            type: 'results',
+            data: {
+                results: analysis.results,
+                options: analysis.options ? analysis.options.getValues() : {},
+                mode: this.model.settings().get('syntaxMode') ? 'text' : 'rich',
+                devMode: this.model.settings().get('devMode'),
+                format: format,
+                refs: this._refsTable.getNumbers(analysis.ns),
+                refsMode: this.model.settings().getSetting('refsMode'),
+                isEmpty: resources.isEmpty,
+                hasTitle: resources.hasTitle,
+                selected: newSelected === null ? null : newSelected === analysis,
+                annotationSelected: newSelected === null ? false : newSelected.name === 'empty',
+                editState: this.model.get('editState')
+            }
+        };
+        resources.iframe.contentWindow.postMessage(event, this.iframeUrl);
     },
     _updateAll() {
 

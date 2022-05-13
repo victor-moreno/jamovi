@@ -19,6 +19,8 @@ const host = require('./host');
 const ActionHub = require('./actionhub');
 const { s6e } = require('../common/utils');
 
+const JError = require('./errors').JError;
+const CancelledError = require('./errors').CancelledError;
 
 
 function crc16(s) {
@@ -1717,6 +1719,7 @@ const BackstageModel = Backbone.Model.extend({
                 progNotif.set({
                     title: progress.title,
                     progress: [ progress.p, progress.n ],
+                    cancel: progress.cancel,
                 });
                 this.trigger('notification', progNotif);
 
@@ -1740,7 +1743,13 @@ const BackstageModel = Backbone.Model.extend({
         catch (e) {
             if (deactivated)
                 this.set('activated', true);
-            this._notify({ message: _('Unable to open'), cause: e.cause || e.message, type: 'error' });
+
+            if (e instanceof CancelledError)
+                ; // do nothing
+            else if (e instanceof JError)
+                this._notify(e);
+            else
+                this._notify({ message: _('Unable to open'), cause: e.message, type: 'error' });
         }
         finally {
             progNotif.dismiss();
@@ -1888,7 +1897,7 @@ const BackstageModel = Backbone.Model.extend({
             title: error.message,
             message: error.cause,
             duration: 3000,
-            type: error.type ? error.type : 'info',
+            type: 'error',
         });
         this.trigger('notification', notification);
     },

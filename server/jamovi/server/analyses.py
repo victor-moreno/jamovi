@@ -120,6 +120,24 @@ class Analysis:
 
     def set_results(self, results, complete=True, silent=False):
 
+        if results.results.error.message != '':
+            use_previous_results = False
+            if len(results.results.group.elements) == 0:
+                use_previous_results = True
+            elif len(results.results.group.elements) == 1:
+                # i'm not sure why we have to do this
+                first_elem = results.results.group.elements[0]
+                if (first_elem.WhichOneof('type') == 'preformatted'
+                        and first_elem.preformatted == ''):
+                    use_previous_results = True
+
+            if use_previous_results:
+                new_results = self.results
+                new_results.results.error.message = results.results.error.message
+                self._change_status_to_complete(new_results.results)
+                results = new_results
+                complete = True
+
         self.results = results
         self.complete = complete
         if len(results.options.names) > 0:  # if not empty
@@ -214,6 +232,19 @@ class Analysis:
         if not silent:
             self.parent._notify_results_changed(self)
 
+    def get_using(self):
+        return self.options.get_using()
+
+    def notify_changes(self, changes, renamed=None):
+        if renamed:
+            self.options.rename_using(renamed)
+        if changes:
+            self.changes |= set(changes)
+        self.complete = False
+        self.status = Analysis.Status.NONE
+        if self.enabled:
+            self.parent._notify_options_changed(self)
+
     def copy_from(self, analysis):
         self.revision = analysis.revision
         self.status = analysis.status
@@ -232,10 +263,12 @@ class Analysis:
             child.results.dependsOn = self.id
 
     def run(self):
+        self.complete = False
         self.status = Analysis.Status.NONE
         self.parent._notify_options_changed(self)
 
     def rerun(self):
+        self.complete = False
         self.status = Analysis.Status.NONE
         self.clear_state = True
         self.parent._notify_options_changed(self)
@@ -247,7 +280,7 @@ class Analysis:
         self._change_status_to_complete(clone.results, strip_content)
         return clone.SerializeToString()
 
-    def _change_status_to_complete(self, pb, strip_content):
+    def _change_status_to_complete(self, pb, strip_content=False):
         if (pb.status != Analysis.Status.COMPLETE.value
                 and pb.status != Analysis.Status.ERROR.value):
             pb.status = Analysis.Status.COMPLETE.value
@@ -383,7 +416,11 @@ class Analyses:
             analysis_meta.translate_defaults(module_meta, i18n.get_language())
 
             if enabled is None:
-                enabled = not analysis_meta.defn.get('arbitraryCode', False)
+                if (analysis_meta.defn.get('arbitraryCode', False)
+                        or analysis_meta.defn.get('arbitraryCode2', False)):
+                    enabled = False
+                else:
+                    enabled = True
 
             options = Options.create(option_defs)
             if options_pb is not None:
@@ -532,7 +569,8 @@ class Analyses:
 
     def rerun(self):
         for analysis in self:
-            analysis.rerun()
+            if analysis.enabled:
+                analysis.rerun()
 
     @property
     def needs_init(self):

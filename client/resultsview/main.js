@@ -239,7 +239,7 @@ class Main {  // this is constructed at the bottom
             for (let i = 0; i < address.length; i++)
                 node = node.querySelectorAll(`[data-name="${ b64.enc(address[i]) }"]`)[0];
 
-            let incHtml = this.resultsDefn.mode === 'rich';
+            let incHtml = true;
             let incText = true;
             let incImage = false;
 
@@ -291,24 +291,10 @@ class Main {  // this is constructed at the bottom
         }
     }
 
-    _resultsFailed() {
-        let results = this.resultsDefn.results;
-        return results.error && results.group === null && results.array === null && results.html === null && results.image === null;
-    }
-
     _render() {
-        if (this._resultsFailed()) {
-            let root = this.layout.getItem('root');
-            if (root) {
-                root.item.setError(this.resultsDefn.results.error);
-                return;
-            }
-        }
-
         this.layout.begin();
 
         let current = this.layout.include('root', () => {
-            this.$body.attr('data-mode', this.resultsDefn.mode);
             this.$body.off('annotation-editing');
             this.$body.off('annotation-lost-focus');
             this.$body.off('annotation-format-changed');
