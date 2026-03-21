@@ -26,29 +26,30 @@ class Permissions:
             self.library.browseable = True
             self.library.addRemove = True
             self.library.showHide = True
+            self.library.sideLoad = True
             self.browse.local = True
             self.browse.examples = True
             self.open.local = True
-            self.open.temp = True
+            self.open.upload = True
             self.open.remote = True
             self.open.examples = True
             self.save.local = True
-            self.save.temp = True
+            self.save.download = True
         elif app_mode == 'cloud':
-            self.library.browseable = False
-            self.library.addRemove = False
-            self.library.showHide = False
+            self.library.browseable = conf.get('permissions_library_browseable', '0') == '1'
+            self.library.addRemove = conf.get('permissions_library_add_remove', '0') == '1'
+            self.library.showHide = conf.get('permsissions_library_show_hide', '0') == '1'
+            self.library.sideLoad = False
             self.browse.local = False
             self.browse.examples = True
             self.open.local = False
-            self.open.temp = True
+            self.open.upload = True
             self.open.remote = True
             self.open.examples = True
             self.save.local = False
-            self.save.temp = True
-
-            self.dataset.maxRows = 10000
-            self.dataset.maxColumns = 100
+            self.save.download = True
+            self.dataset.maxRows = int(conf.get('permissions_max_rows', '10000'))
+            self.dataset.maxColumns = int(conf.get('permissions_max_columns', '100'))
 
     def __init__(self):
         self.library = AttrDict({
@@ -65,12 +66,12 @@ class Permissions:
         self.open = AttrDict({
             'local': False,
             'examples': False,
-            'temp': False,
+            'upload': False,
         })
 
         self.save = AttrDict({
             'local': False,
-            'temp': False
+            'download': False
         })
 
         self.dataset = AttrDict({

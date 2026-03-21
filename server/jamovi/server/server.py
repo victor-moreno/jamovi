@@ -12,11 +12,14 @@ from tornado import gen
 from .clientconnection import ClientConnection
 from .session import Session
 from .session import SessionEvent
-from .modules import Modules
 from .utils import conf
 from .appinfo import app_info
 from jamovi.core import Dirs
 from .i18n import _
+from .webhandlers import ForwardHandler
+
+from .exceptions import FileExistsException
+from .exceptions import UserException
 
 import sys
 import os
@@ -26,12 +29,12 @@ import mimetypes
 import re
 import json
 
+from urllib.parse import urlparse
 from tempfile import NamedTemporaryFile
 from tempfile import TemporaryDirectory
 from shutil import rmtree
 
 import logging
-import pkg_resources
 import threading
 import asyncio
 from asyncio import create_task
@@ -43,26 +46,33 @@ if tornado_major < 5:
     raise RuntimeError('tornado 5+ is required')
 
 
+access_key = conf.get('access_key', None)
+access_key_generated = False
+
+if access_key is None:
+    access_key = uuid.uuid4().hex
+    access_key_generated = True
+    conf.set('access_key', access_key)
+
+
 class SingleFileHandler(RequestHandler):
 
-    def initialize(self, path, is_pkg_resource=False, mime_type=None, extra_headers={}):
+    _path: str
+    _mime_type: str | None
+    _extra_headers: dict[str, str]
+
+    def initialize(self, path, mime_type=None, extra_headers=None):
         self._path = path
-        self._is_pkg_resource = is_pkg_resource
         self._mime_type = mime_type
-        self._extra_headers = extra_headers
+        self._extra_headers = extra_headers or { }
 
     def get(self):
         if self._mime_type is not None:
             self.set_header('Content-Type', self._mime_type)
-        self.set_extra_headers(self._path)
-        if self._is_pkg_resource:
-            with pkg_resources.resource_stream(__name__, self._path) as file:
-                content = file.read()
-                self.write(content)
-        else:
-            with open(self._path, 'rb') as file:
-                content = file.read()
-                self.write(content)
+        self.set_extra_headers(self._extra_headers)
+        with open(self._path, 'rb') as file:
+            content = file.read()
+            self.write(content)
 
     def set_extra_headers(self, path):
         for key, value in self._extra_headers.items():
@@ -80,10 +90,13 @@ class StaticFileHandler(TornadosStaticFileHandler):
             self.set_header(key, value)
 
 
-class ResourceHandler(RequestHandler):
+class SessHandler(RequestHandler):
 
     def initialize(self, session):
         self._session = session
+
+
+class ResourceHandler(SessHandler):
 
     def get(self, instance_id, resource_id):
         instance = self._session.get(instance_id)
@@ -111,7 +124,7 @@ class ResourceHandler(RequestHandler):
                 self.write(content)
 
 
-class ModuleAssetHandler(RequestHandler):
+class ModuleAssetHandler(SessHandler):
 
     def get(self, instance_id, analysis_id, path):
         instance = self._session.get(instance_id)
@@ -123,7 +136,7 @@ class ModuleAssetHandler(RequestHandler):
 
         analysis = instance.analyses.get(int(analysis_id))
         module_name = analysis.ns
-        module_path = Modules.instance().get(module_name).path
+        module_path = self._session.modules.get(module_name).path
         asset_path = os.path.join(module_path, 'R', analysis.ns, path)
 
         if asset_path.startswith(module_path) is False:
@@ -143,13 +156,14 @@ class ModuleAssetHandler(RequestHandler):
             self.set_header('Cache-Control', 'private, no-cache, must-revalidate, max-age=0')
             self.write(content)
 
-class ModuleI18nDescriptor(RequestHandler):
+
+class ModuleI18nDescriptor(SessHandler):
 
     def get(self, module_name, code):
         content = None
         try:
             try:
-                module_path = Modules.instance().get(module_name).path
+                module_path = self._session.modules.get(module_name).path
                 defn_path = os.path.join(module_path, 'R', module_name, 'i18n', f'{ code }.json')
                 with open(defn_path, 'rb') as file:
                     content = file.read()
@@ -166,13 +180,14 @@ class ModuleI18nDescriptor(RequestHandler):
             self.set_header('Cache-Control', 'private, no-store, must-revalidate, max-age=0')
             self.write(content)
 
-class ModuleDescriptor(RequestHandler):
+
+class ModuleDescriptor(SessHandler):
 
     def get(self, module_name):
         content = None
         try:
             try:
-                module_path = Modules.instance().get(module_name).path
+                module_path = self._session.modules.get(module_name).path
                 defn_path = os.path.join(module_path, 'jamovi-full.yaml')
                 with open(defn_path, 'rb') as file:
                     content = file.read()
@@ -189,7 +204,7 @@ class ModuleDescriptor(RequestHandler):
             self.write(content)
 
 
-class AnalysisDescriptor(RequestHandler):
+class AnalysisDescriptor(SessHandler):
 
     def get(self, module_name, analysis_name, part):
         if part == '':
@@ -198,7 +213,7 @@ class AnalysisDescriptor(RequestHandler):
         content = None
         try:
             try:
-                module_path = Modules.instance().get(module_name).path
+                module_path = self._session.modules.get(module_name).path
 
                 if part == 'js':
                     analysis_path = os.path.join(module_path, 'ui', analysis_name.lower() + '.' + part)
@@ -227,17 +242,45 @@ class EntryHandler(RequestHandler):
         self._session = session
 
     async def get(self):
+
+        required_key = conf.get('access_key', '')
+        if required_key != '':
+            provided_key = self.get_argument('access_key', None)
+            if provided_key is None:
+                self.set_status(401)
+                self.write('<h1>access key required</h1>')
+                self.write('<p>You must append ?access_key=... onto your URL</p>')
+                return
+            elif provided_key != required_key:
+                self.set_status(401)
+                self.write('<h1>auth failed</h1>')
+                self.write('<p>provided access key is not correct</p>')
+                return
+            else:
+                self.set_cookie('access_key', provided_key)
+
         instance = await self._session.create()
-        query = self.get_argument('open', '')
-        if query:
-            query = '?open=' + query
-        self.redirect('/%s/%s' % (instance.id, query))
+        query = ''
+        if self.request.query:
+            query = f'?{ self.request.query }'
+        self.redirect('%s/%s' % (instance.id, query))
 
 
 class OpenHandler(RequestHandler):
 
     def initialize(self, session):
         self._session = session
+        self._access_key = conf.get('access_key', '')
+
+    def prepare(self, instance_id=None):
+        if self._access_key != '':
+            key_provided = self.get_cookie('access_key', None)
+            if key_provided is None:
+                self.write(f'{{"status":"error","message":{ json.dumps(_("Authentication required")) }}}\n')
+                self.finish()
+            elif self._access_key != key_provided:
+                self.write(f'{{"status":"error","message":{ json.dumps(_("Authentication failure")) }}}\n')
+                self.finish()
 
     async def get(self, instance_id=None):
 
@@ -258,7 +301,7 @@ class OpenHandler(RequestHandler):
                 return
 
         title = self.get_query_argument('title', None)
-        is_temp = self.get_query_argument('temp', '0') == '1'
+        is_temp = self.get_query_argument('temp', False) is not False
         ext = None
 
         filename = self.get_query_argument('filename', None)
@@ -282,20 +325,54 @@ class OpenHandler(RequestHandler):
 
     async def post(self, instance_id=None):
 
-        filename = self.get_query_argument('filename')
+        file_path: str
+        file_title = None
+        file_ext = None
+        options: dict = { }
+
+        try:
+            options_json = self.get_body_argument('options', '{}')
+            options_dict = json.loads(options_json)
+            if isinstance(options_dict, dict):
+                options = options_dict
+        except (KeyError, ValueError):
+            pass
+
+        if 'file' in self.request.files:
+            # jamovi handling uploads directly
+            file = self.request.files['file'][-1]
+            file_title, ext = os.path.splitext(file.filename)
+            temp_file = NamedTemporaryFile(suffix=ext)
+            with open(temp_file.name, 'wb') as writer:
+                writer.write(file.body)
+            file_path = temp_file.name
+            is_temp = True
+        elif 'path' in options:
+            # jamovi desktop open from path
+            file_path = options['path']
+            is_temp = options.get('temp', False) is not False
+            file_title = options.get('title', None)
+            file_ext = options.get('ext', None)
+        elif 'file.path' in self.request.body_arguments:
+            # jamovi sitting behind a reverse proxy that handles the uploads (nginx)
+            file_path = self.get_body_argument('file.path')
+            filename = self.get_body_argument('file.name')
+            file_title, dot_ext = os.path.splitext(filename)
+            file_ext = dot_ext[1:]
+            is_temp = True
+        else:
+            self.set_status(400)
+            self.write('400: Bad Request')
+            return
 
         lang_code = self.request.headers.get('Accept-Language', 'en')
-
         self._session.set_language(lang_code)
 
         try:
-            base, ext = os.path.splitext(os.path.basename(filename))
-            temp_file = NamedTemporaryFile(suffix=ext)
-            with open(temp_file.name, 'wb') as writer:
-                writer.write(self.request.body)
             instance = await self._session.create()
-            async for progress in instance.open(temp_file.name, title=base, is_temp=True):
+            async for progress in instance.open(file_path, title=file_title, is_temp=is_temp, ext=file_ext, options=options):
                 self._write('progress', progress)
+                await self.flush()
         except Exception as e:
             log.exception(e)
             self._write(e)
@@ -316,7 +393,51 @@ class OpenHandler(RequestHandler):
         else:
             p, n = progress
             self.write(f'{{"status":"in-progress","p":{ p },"n":{ n }}}\n')
-        self.flush()
+
+
+class SaveHandler(SessHandler):
+
+    async def post(self, instance_id: str):
+
+        instance = self._session.get(instance_id)
+        if instance is None:
+            self.set_status(404)
+            self.write('404: Not Found')
+            return
+
+        options: dict = { }
+
+        try:
+            options_json = self.get_body_argument('options', '{}')
+            options_dict = json.loads(options_json)
+            if isinstance(options_dict, dict):
+                options = options_dict
+        except (KeyError, ValueError):
+            pass
+
+        content_file = self.request.files.get('content', None)
+        if content_file is not None:
+            options['content'] = content_file[-1].body
+
+        self.set_header('content-type', 'text/plain')  # jsonlines, so text/plain
+
+        data: dict
+
+        try:
+            stream = instance.save(options)
+            async for progress in stream:
+                p, n = progress
+                self.write(f'{{"status":"in-progress","p":{ p },"n":{ n }}}\n')
+                await self.flush()
+            data = { 'status': 'OK' }
+            data.update(await stream)
+        except FileExistsException:
+            data = { 'status': 'error', 'code': 'file-exists'}
+        except UserException as e:
+            data = { 'status': 'error', 'message': e.cause }
+
+        content = json.dumps(data)
+        self.write(content)
 
 
 @stream_request_body
@@ -359,10 +480,7 @@ class PDFConverter(RequestHandler):
         return self._future
 
 
-class DatasetsList(RequestHandler):
-
-    def initialize(self, session):
-        self._session = session
+class DatasetsList(SessHandler):
 
     def get(self):
         datasets = [ ]
@@ -379,10 +497,7 @@ class DatasetsList(RequestHandler):
         self.write(json.dumps(datasets))
 
 
-class AuthTokenHandler(RequestHandler):
-
-    def initialize(self, session):
-        self._session = session
+class AuthTokenHandler(SessHandler):
 
     def post(self):
         authorization = self.request.headers.get('authorization')
@@ -444,19 +559,18 @@ class DownloadFileHandler(TornadosStaticFileHandler):
                 f'attachment; filename="{ filename }"')
 
 
-class EndHandler(RequestHandler):
-    def initialize(self, session):
-        self._session = session
-
+class EndHandler(SessHandler):
     def post(self):
         self._session.stop()
 
 
 class ConfigJSHandler(RequestHandler):
+    def initialize(self, roots):
+        self._roots = roots
+
     def get(self):
         self.set_header('Content-Type', 'application/javascript')
-        self.set_header('Cache-Control', 'public, max-age=86400')
-        self.write('window.config = {}')
+        self.write(f'window.config = {{"client":{{"roots":["{ self._roots[0] }","{ self._roots[1] }","{ self._roots[2] }"]}}}}')
 
 
 class Server:
@@ -469,7 +583,8 @@ class Server:
                  host='127.0.0.1',
                  session_id=None,
                  stdin_slave=False,
-                 debug=False):
+                 debug=False,
+                 dev_server=None):
 
         # these are mostly not necessary, however the mimetypes library relies
         # on OS level config, and this can be bad/wrong. so we override these
@@ -491,23 +606,23 @@ class Server:
         else:
             self._session_id = str(uuid.uuid4())
 
-        if port == 0:
-            self._ports = [ 0, 0, 0 ]
-        else:
-            self._ports = [int(port), int(port) + 1, int(port) + 2]
-
         self._ioloop = asyncio.get_event_loop()
 
         self._host = host
         self._stdin_slave = stdin_slave
         self._debug = debug
+        self._dev_server = dev_server
 
         self.ports_opened = self._ioloop.create_future()
 
         self._spool_path = conf.get('spool_path')
         if self._spool_path is None:
             self._spool = TemporaryDirectory()
-            self._spool_path = self._spool.name
+            # realpath() is required to expand the windows short path
+            # at time of writing, R (4.3) was barfing on the short path
+            # hence this fix
+            spool_path = os.path.realpath(self._spool.name)
+            self._spool_path = spool_path
 
         if stdin_slave:
             self._thread = threading.Thread(target=self._read_stdin)
@@ -577,7 +692,7 @@ class Server:
 
             try:
                 await self._session.restart_engines()
-                await Modules.instance().install_from_file(path)
+                await self._session.modules.install_from_file(path, update=True)
                 self._session.notify_global_changes()
             except Exception:
                 import traceback
@@ -594,8 +709,7 @@ class Server:
             self._session.stop()
 
     def start(self):
-        t = create_task(self._run())
-        t.add_done_callback(lambda t: t.result())
+        create_task(self._run())
 
     async def wait_ended(self):
         if self._session is not None:
@@ -603,22 +717,19 @@ class Server:
 
     async def _run(self):
 
-        await Modules.instance().read()
-
         client_path = conf.get('client_path')
 
         i18n_path = conf.get('i18n_path', None)
         if i18n_path is None:
             i18n_path = os.path.join(conf.get('home'), 'i18n', 'json')
 
-        coms_path = 'jamovi.proto'
-
         session_path = os.path.join(self._spool_path, self._session_id)
         os.makedirs(session_path)
 
         self._session = Session(self._spool_path, self._session_id)
         self._session.set_update_request_handler(self._set_update_status)
-        self._session.add_session_listener(self._session_event)
+        # self._session.add_session_listener(self._session_event)
+
         await self._session.start()
 
         assets_path = os.path.join(client_path, 'assets')
@@ -635,110 +746,222 @@ class Server:
         if ping_timeout:
             ping_timeout = int(ping_timeout)
 
-        self._main_app = tornado.web.Application([
-            (r'/', EntryHandler, { 'session': self._session }),
-            (r'/config.js', ConfigJSHandler),
-            (r'/open', OpenHandler, { 'session': self._session }),
-            (r'/auth', AuthTokenHandler, { 'session': self._session }),
-            (r'/settings', SettingsHandler, { 'session': self._session }),
-            (r'/end', EndHandler, { 'session': self._session }),
-            (r'/version', VersionHandler),
-            (r'/([a-f0-9-]+)/open', OpenHandler, { 'session': self._session }),
-            (r'/([a-f0-9-]+)/coms', ClientConnection, { 'session': self._session }),
-            (r'/([a-f0-9-]+/dl/.*)', DownloadFileHandler, { 'path': self._session.session_path }),
-            (r'/proto/coms.proto', SingleFileHandler, {
-                'path': coms_path,
-                'is_pkg_resource': True,
-                'mime_type': 'text/plain' }),
-            (r'/modules/([0-9a-zA-Z]+)', ModuleDescriptor),
-            (r'/modules/([0-9a-zA-Z]+)/i18n/([a-z]{2}(?:-[a-z]{2})?)', ModuleI18nDescriptor),
-            (r'/analyses/([0-9a-zA-Z]+)/([0-9a-zA-Z]+)/([.0-9a-zA-Z]+)', AnalysisDescriptor),
-            (r'/analyses/([0-9a-zA-Z]+)/([0-9a-zA-Z]+)()', AnalysisDescriptor),
-            (r'/utils/to-pdf', PDFConverter, { 'pdfservice': self }),
-            (r'/api/datasets', DatasetsList, { 'session': self._session }),
-            (r'/i18n/', I18nManifestHandler, {
+        host = conf.get('hostname', '127.0.0.1')
+        host_a = conf.get('host_a', host)
+        host_b = conf.get('host_b', host_a if re.match(r'[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+', host) else f'a.{ host_a }')
+        host_c = conf.get('host_c', host_a if re.match(r'[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+', host) else f'r.{ host_a }')
+
+        host_a = urlparse(f'//{ host_a }')
+        host_b = urlparse(f'//{ host_b }')
+        host_c = urlparse(f'//{ host_c }')
+
+        path_a = host_a.path.rstrip('/')
+        path_b = host_b.path.rstrip('/')
+        path_c = host_c.path.rstrip('/')
+
+        port_a = host_a.port
+        port_b = host_b.port
+        port_c = host_c.port
+
+        host_a = host_a.hostname
+        host_b = host_b.hostname
+        host_c = host_c.hostname
+
+        roots = [ ]
+
+        if host_a != host_b and host_b != host_c:
+            separate_by = 'host'
+        elif path_a != path_b and path_b != path_c:
+            separate_by = 'path'
+            if port_a is None:
+                port_a = 80
+        elif port_a is None and port_b is None and port_c is None:
+            separate_by = 'port'
+            port_a = port_b = port_c = 0
+        elif port_a != port_b and port_b != port_c:
+            separate_by = 'port'
+        else:
+            raise ValueError
+
+        self._main_app = tornado.web.Application(
+            websocket_ping_interval=ping_interval,
+            websocket_ping_timeout=ping_timeout)
+
+        if separate_by == 'port':
+            self._analysisui_app = tornado.web.Application()
+            self._resultsview_app = tornado.web.Application()
+        else:
+            self._analysisui_app = self._main_app
+            self._resultsview_app = self._main_app
+
+        match_a = re.escape(host_a) if host_a else '.*'
+        match_b = re.escape(host_b) if host_b else '.*'
+        match_c = re.escape(host_c) if host_c else '.*'
+
+        self._main_app.add_handlers(match_a, [
+            (fr'{ path_a }/', EntryHandler, { 'session': self._session }),
+            (fr'{ path_a }/config.js', ConfigJSHandler, { 'roots': roots }),
+            (fr'{ path_a }/open', OpenHandler, { 'session': self._session }),
+            (fr'{ path_a }/auth', AuthTokenHandler, { 'session': self._session }),
+            (fr'{ path_a }/settings', SettingsHandler, { 'session': self._session }),
+            (fr'{ path_a }/end', EndHandler, { 'session': self._session }),
+            (fr'{ path_a }/version', VersionHandler),
+            (fr'{ path_a }/([a-f0-9-]+)/open', OpenHandler, { 'session': self._session }),
+            (fr'{ path_a }/([a-f0-9-]+)/save', SaveHandler, { 'session': self._session }),
+            (fr'{ path_a }/([a-f0-9-]+)/coms', ClientConnection, { 'session': self._session }),
+            (fr'{ path_a }/([a-f0-9-]+/dl/.*)', DownloadFileHandler, { 'path': self._session.session_path }),
+            (fr'{ path_a }/modules/([0-9a-zA-Z]+)', ModuleDescriptor, { 'session': self._session }),
+            (fr'{ path_a }/modules/([0-9a-zA-Z]+)/i18n/([a-z]{{2}}(?:-[a-z]{{2}})?)', ModuleI18nDescriptor, { 'session': self._session }),
+            (fr'{ path_a }/analyses/([0-9a-zA-Z]+)/([0-9a-zA-Z]+)/([.0-9a-zA-Z]+)', AnalysisDescriptor, { 'session': self._session }),
+            (fr'{ path_a }/analyses/([0-9a-zA-Z]+)/([0-9a-zA-Z]+)()', AnalysisDescriptor, { 'session': self._session }),
+            (fr'{ path_a }/utils/to-pdf', PDFConverter, { 'pdfservice': self }),
+            (fr'{ path_a }/api/datasets', DatasetsList, { 'session': self._session }),
+            (fr'{ path_a }/i18n/', I18nManifestHandler, {
                 'session': self._session,
                 'path': f'{ i18n_path }/manifest.json' }),
-            (r'/i18n/(.+)', StaticFileHandler, { 'path': i18n_path }),
-            (r'/assets/(.*)', StaticFileHandler, {
-                'path': assets_path }),
-            (r'/[a-f0-9-]+/()', StaticFileHandler, {
-                'path': client_path,
-                'default_filename': 'index.html',
-                'extra_headers': cache_headers }),
-            (r'/([-0-9a-z.]*)', StaticFileHandler, {
-                'path': client_path,
-                'extra_headers': cache_headers })
-        ],
-        websocket_ping_interval = ping_interval,
-        websocket_ping_timeout = ping_timeout)
-
-        analysisui_path = os.path.join(client_path, 'analysisui.html')
-
-        self._analysisui_app = tornado.web.Application([
-            (r'/[-0-9a-f]+/', SingleFileHandler, {
-                'path': analysisui_path,
-                'extra_headers': cache_headers }),
-            (r'/assets/([-.0-9a-zA-Z]+)', StaticFileHandler, {
-                'path': assets_path }),
-            (r'/([-.0-9a-zA-Z]+)', StaticFileHandler, {
-                'path': client_path,
-                'extra_headers': cache_headers }),
+            (fr'{ path_a }/i18n/(.+)', StaticFileHandler, { 'path': i18n_path }),
         ])
 
-        resultsview_path = os.path.join(client_path, 'resultsview.html')
+        try:
+            from .extras import get_extra_handlers
+            extra_handlers = get_extra_handlers()
+            for h_path, handler in extra_handlers:
+                h_path = f'{ path_a }{ h_path }'
+                self._main_app.add_handlers(match_a, [ (h_path, handler, { 'session': self._session }) ])
+        except ImportError:
+            pass
 
-        self._resultsview_app = tornado.web.Application([
-            (r'/[-0-9a-z]+/[0-9]+/', SingleFileHandler, {
-                'path': resultsview_path,
-                'extra_headers': cache_headers }),
-            (r'/assets/([-.0-9a-zA-Z]+)', StaticFileHandler, {
-                'path': assets_path }),
-            (r'/([-.0-9a-zA-Z]+)', StaticFileHandler, {
-                'path': client_path,
-                'extra_headers': cache_headers }),
-            (r'/([-0-9a-z]+)/[0-9]+/res/(.+)', ResourceHandler, {
-                'session': self._session }),
-            (r'/([-0-9a-z]+)/([0-9]+)/module/(.+)',
-                ModuleAssetHandler),
-        ])
+        if self._dev_server:
+            self._main_app.add_handlers(match_a, [
+                (fr'{ path_a }/(@vite/client)', ForwardHandler, {
+                    'base_url': self._dev_server }),
+                (fr'{ path_a }/[a-f0-9-]+/(.*)', ForwardHandler, {
+                    'base_url': self._dev_server }),
+                (fr'{ path_a }/(.*)', ForwardHandler, {
+                    'base_url': self._dev_server }),
+            ])
+        else:
+            self._main_app.add_handlers(match_a, [
+                (fr'{ path_a }/assets/(.*)', StaticFileHandler, {
+                    'path': assets_path }),
+                (fr'{ path_a }/[a-f0-9-]+/()', StaticFileHandler, {
+                    'path': client_path,
+                    'default_filename': 'index.html',
+                    'extra_headers': cache_headers }),
+                (fr'{ path_a }/([-0-9a-z.]*)', StaticFileHandler, {
+                    'path': client_path,
+                    'extra_headers': cache_headers })
+            ])
 
-        sockets = tornado.netutil.bind_sockets(self._ports[0], self._host)
+        if self._dev_server:
+
+            self._analysisui_app.add_handlers(match_b, [
+                (fr'{ path_b }/', VersionHandler),  # send back garbage to abort the vite web socket
+                (fr'{ path_b }/[a-f0-9-]+/(.*)', ForwardHandler, {
+                    'base_url': self._dev_server, 'default_filename': 'analysisui.html' }),
+                (fr'{ path_b }/(.*)', ForwardHandler, {
+                    'base_url': self._dev_server }),
+            ])
+
+            self._resultsview_app.add_handlers(match_c, [
+                (fr'{ path_c }/', VersionHandler),  # send back garbage to abort the vite web socket
+                (fr'{ path_c }/([-0-9a-z]+)/[0-9]+/res/(.+)', ResourceHandler, {
+                    'session': self._session }),
+                (fr'{ path_c }/([-0-9a-z]+)/([0-9]+)/module/(.+)',
+                    ModuleAssetHandler, { 'session': self._session }),
+                (fr'{ path_c }/[a-f0-9-]+/[0-9]+/(.*)', ForwardHandler, {
+                    'base_url': self._dev_server, 'default_filename': 'resultsview.html' }),
+                (fr'{ path_c }/(.*)', ForwardHandler, {
+                    'base_url': self._dev_server }),
+            ])
+
+        else:
+            analysisui_path = os.path.join(client_path, 'analysisui.html')
+            self._analysisui_app.add_handlers(match_b, [
+                (fr'{ path_b }/[-0-9a-f]+/', SingleFileHandler, {
+                    'path': analysisui_path,
+                    'extra_headers': cache_headers }),
+                (fr'{ path_b }/assets/(.*)', StaticFileHandler, {
+                    'path': assets_path }),
+                (fr'{ path_b }/([-.0-9a-zA-Z]+)', StaticFileHandler, {
+                    'path': client_path,
+                    'extra_headers': cache_headers }),
+            ])
+
+            resultsview_path = os.path.join(client_path, 'resultsview.html')
+            self._resultsview_app.add_handlers(match_c, [
+                (fr'{ path_c }/[-0-9a-z]+/[0-9]+/', SingleFileHandler, {
+                    'path': resultsview_path,
+                    'extra_headers': cache_headers }),
+                (fr'{ path_c }/assets/(.*)', StaticFileHandler, {
+                    'path': assets_path }),
+                (fr'{ path_c }/([-.0-9a-zA-Z]+)', StaticFileHandler, {
+                    'path': client_path,
+                    'extra_headers': cache_headers }),
+                (fr'{ path_c }/([-0-9a-z]+)/[0-9]+/res/(.+)', ResourceHandler, {
+                    'session': self._session }),
+                (fr'{ path_c }/([-0-9a-z]+)/([0-9]+)/module/(.+)',
+                    ModuleAssetHandler, { 'session': self._session }),
+            ])
+
+        sockets = tornado.netutil.bind_sockets(port_a, self._host)
         server = tornado.httpserver.HTTPServer(self._main_app)
         server.add_sockets(sockets)
-        self._ports[0] = sockets[0].getsockname()[1]
+        port_a = sockets[0].getsockname()[1]
 
-        sockets = tornado.netutil.bind_sockets(self._ports[1], self._host)
-        server = tornado.httpserver.HTTPServer(self._analysisui_app)
-        server.add_sockets(sockets)
-        self._ports[1] = sockets[0].getsockname()[1]
+        if separate_by == 'port':
+            sockets = tornado.netutil.bind_sockets(port_b, self._host)
+            server = tornado.httpserver.HTTPServer(self._analysisui_app)
+            server.add_sockets(sockets)
+            port_b = sockets[0].getsockname()[1]
 
-        sockets = tornado.netutil.bind_sockets(self._ports[2], self._host)
-        server = tornado.httpserver.HTTPServer(self._resultsview_app)
-        server.add_sockets(sockets)
-        self._ports[2] = sockets[0].getsockname()[1]
-
-        hostname = conf.get('hostname', '127.0.0.1')
-        if re.match(r'[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+', hostname):
-            hosts = f'{ hostname }:{ self._ports[0] } { hostname }:{ self._ports[1] } { hostname }:{ self._ports[2] }'
+            sockets = tornado.netutil.bind_sockets(port_c, self._host)
+            server = tornado.httpserver.HTTPServer(self._resultsview_app)
+            server.add_sockets(sockets)
+            port_c = sockets[0].getsockname()[1]
         else:
-            hosts = f'{ hostname } a.{ hostname } r.{ hostname }'
+            port_c = port_b = port_a
 
-        # now we have the port numbers, we can add CSP
-        cache_headers[ 'Content-Security-Policy' ] = f'''
-            default-src 'self';
-            img-src 'self' data:;
-            script-src  'self' 'unsafe-eval' 'unsafe-inline';
-            style-src 'self' 'unsafe-inline';
-            frame-src 'self' { hosts } https://www.jamovi.org;
-        '''.replace('\n', '')
+        if host_a is not None:
+            if separate_by == 'port':
+                hosts = f'{ host_a }:{ port_a } { host_b }:{ port_b } { host_c }:{ port_c }'
+                roots[:] = (f'{ host_a }:{ port_a }', f'{ host_b }:{ port_b }', f'{ host_c }:{ port_c }')
+            elif separate_by == 'path':
+                if port_a != 80:
+                    hosts = f'{ host_a }:{ port_a }'
+                    roots[:] = (f'{ host_a }:{ port_a }{ path_a }', f'{ host_b }:{ port_b }{ path_b }', f'{ host_c }:{ port_c }{ path_c }')
+                else:
+                    hosts = f'{ host_a }'
+                    roots[:] = (f'{ host_a }{ path_a }', f'{ host_b }{ path_b }', f'{ host_c }{ path_c }')
+            else:  # separate_by == 'host':
+                if port_a != 80:
+                    hosts = f'{ host_a }:{ port_a } { host_b }:{ port_b } { host_c }:{ port_c }'
+                    roots[:] = (f'{ host_a }:{ port_a }', f'{ host_b }:{ port_b }', f'{ host_c }:{ port_c }')
+                else:
+                    hosts = f'{ host_a } { host_b } { host_c }'
+                    roots[:] = (host_a, host_b, host_c)
 
-        self.ports_opened.set_result(self._ports)
+            # now we have the port numbers, we can add CSP
+            cache_headers[ 'Content-Security-Policy' ] = f'''
+                default-src 'self';
+                font-src 'self' data:;
+                img-src 'self' data:;
+                script-src  'self' 'unsafe-eval' 'unsafe-inline';
+                style-src 'self' 'unsafe-inline';
+                frame-src 'self' { hosts } https://www.jamovi.org;
+                connect-src 'self' data:;
+            '''.replace('\n', '')
+
+            log.info(f'listening across origin(s): { hosts }')
+            if access_key_generated:
+                log.info(f'jamovi accessible from: { roots[0] }/?access_key={ access_key }')
+
+        self.ports_opened.set_result((port_a, port_b, port_c, access_key))
 
         # write the port no. to a file, so external software can
         # find out what port jamovi is running on
         app_data = Dirs.app_data_dir()
-        port_name = str(self._ports[0]) + '.port'
+        port_name = f'{ port_a }.port'
         self._port_file = os.path.join(app_data, port_name)
         with open(self._port_file, 'w'):
             pass

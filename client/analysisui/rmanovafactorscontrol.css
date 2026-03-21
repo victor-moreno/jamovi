@@ -8,9 +8,9 @@
     text-align: center ;
     vertical-align: middle ;
     cursor: default ;
-    margin-right: 4px ;
-    margin-left: 4px ;
-    padding-left: 4px;
+    margin-inline-end: 4px ;
+    margin-inline-start: 4px ;
+    padding-inline-start: 4px;
 }
 
 .rma-delete-button:hover {
@@ -34,7 +34,10 @@
 }
 
 .rma-factor-label {
-    margin: 5px 1px 5px 0px;
+    margin-top: 5px;
+    margin-bottom: 5px;
+    margin-inline-start: 0px;
+    margin-inline-end: 1px;
     font-weight: bold;
 }
 
@@ -55,18 +58,6 @@
 
 .silky-rmanova-factors-header {
     margin-bottom: 2px;
-}
-
-.silky-rmanova-factors-header.silky-control-margin-small {
-    margin-top: 3px;
-}
-
-.silky-rmanova-factors-header.silky-control-margin-normal {
-    margin-top: 5px;
-}
-
-.silky-rmanova-factors-header.silky-control-margin-large {
-    margin-top: 10px;
 }
 
 .silky-layout-container:not(.silky-control-body) > .first-row > .silky-rmanova-factors-header {

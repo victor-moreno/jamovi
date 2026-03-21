@@ -9,6 +9,9 @@ const os = require('os');
 const shell = electron.shell;
 const Menu = electron.Menu;
 
+const { clipboard } = electron;
+const { nativeImage } = electron;
+
 const ini = require('./ini');
 const tmp = require('./tmp');
 
@@ -89,12 +92,31 @@ function readConfig() {
 
 const marshallArgs = function(args, wd, first) {
 
-    let cmd = { first: first };
+    const cmd = { first };
 
-    let i = 0;
+    let i;
+
+    // sorry, this is bit hacky, and should all be done properly
+    // but i'm having a bad day. apologies in advance.
+    i = 0;
+    while (i < args.length) {
+        let arg = args[i];
+        if (arg.startsWith('--title=')) {
+            cmd.title = args.splice(i, 1)[0].substring(8);
+        }
+        else if (arg == '--temp') {
+            cmd.temp = true;
+            args.splice(i, 1);
+        }
+        else {
+            i++;
+        }
+    }
+
+    i = 0;
     while (i < args.length) {
         let arg = args[i]
-        if (arg.startsWith('--') && ! ['--version', '--r-version', '--install', '--debug'].includes(arg))
+        if (arg.startsWith('--') && ! ['--version', '--r-version', '--install', '--debug2', '--devel'].includes(arg))
             // strip the chromium switches
             args.splice(i, 1);
         else
@@ -135,9 +157,13 @@ const marshallArgs = function(args, wd, first) {
         // https://github.com/electron/electron/issues/3657
         cmd.open = '';
     }
-    else if (args[0] === '--debug') {
+    else if (args[0] === '--debug2') {
         cmd.open = '';
         cmd.debug = true;
+    }
+    else if (args[0] === '--devel') {
+        cmd.open = '';
+        cmd.devel = true;
     }
     else {
         let filePath = args[0];
@@ -195,8 +221,13 @@ if (debug)
     config.serverArgs.unshift('-vvv');
 if (argvCmd.debug)
     config.serverArgs.push('--debug');
+if (argvCmd.devel)
+    config.serverArgs.push('--dev-server=http://localhost:5173');
 
-global.version = config.version;
+const clientConfig = {
+    version: config.version,
+    roots: undefined,
+}
 
 let env = { };
 if (process.platform === 'linux') {
@@ -266,18 +297,17 @@ const convertToPDF = function(path) {
 
 let server;
 let ports = null;
-let windows = [ ];
 let rootUrl;
-let updateUrl;
-// let recorderWindow = null;
+let accessKey;
 
 const spawn = new Promise((resolve, reject) => {
 
     server = child_process.spawn(
         config.serverExe,
         config.serverArgs,
-        { env: env, detached: true });
+        { env: env, detached: true, cwd: bin });
     // detached, because weird stuff happens on windows if not detached
+    // set the working directory to bin so it doesn't pick up random dlls
 
     let dataListener = (chunk) => {
 
@@ -288,11 +318,12 @@ const spawn = new Promise((resolve, reject) => {
 
         if (ports === null) {
             // the server sends back the ports it has opened through stdout
-            ports = /ports: ([0-9]*), ([0-9]*), ([0-9]*)/.exec(chunk);
+            ports = /ports: ([0-9]+), ([0-9]+), ([0-9]+), access_key: (.+)\r?\n/.exec(chunk);
             if (ports !== null) {
+                let accessKey = ports[4];
                 ports = ports.slice(1, 4);
                 ports = ports.map(x => parseInt(x));
-                resolve(ports);
+                resolve({ ports, accessKey });
             }
         }
 
@@ -312,19 +343,6 @@ const spawn = new Promise((resolve, reject) => {
                         server.stdin.write(response);
                     });
                 }
-            case 'software-update':
-                match = /^"(.*)"$/.exec(match[3]);
-                if (match) {
-                    try {
-                        checkForUpdate(updateUrl, match[1]);
-                        let response = `response: software-update (${ id }) 1\n`;
-                        server.stdin.write(response);
-                    }
-                    catch (e) {
-                        let response = `response: software-update (${ id }) 0 "' + e.message + '"\n`;
-                        server.stdin.write(response);
-                    }
-                }
             }
         }
     };
@@ -336,15 +354,18 @@ const spawn = new Promise((resolve, reject) => {
     server.stderr.on('data', dataListener);
     server.on('close', (code) => reject(`Failed to start (${code})`));
 
-}).then(ports => {
+}).then(info => {
 
     server.on('close', (code) => { if (code === 0) app.quit(); });
 
-    global.mainPort = ports[0];
-    global.analysisUIPort = ports[1];
-    global.resultsViewPort = ports[2];
+    clientConfig.roots = [
+        `http://127.0.0.1:${ info.ports[0] }/`,
+        `http://127.0.0.1:${ info.ports[1] }/`,
+        `http://127.0.0.1:${ info.ports[2] }/`,
+    ];
 
-    rootUrl = `http://127.0.0.1:${ ports[0] }/`
+    rootUrl = `http://127.0.0.1:${ info.ports[0] }/`;
+    accessKey = info.accessKey;
 
     let platform;
     if (process.platform === 'darwin')
@@ -354,14 +375,9 @@ const spawn = new Promise((resolve, reject) => {
     else
         platform = 'linux';
 
-    updateUrl = `https://www.jamovi.org/downloads/update?p=${ platform }&v=${ config.version }&f=zip&r=${ os.release() }&a=${ process.arch }`;
-
-    setTimeout(() => checkForUpdate(updateUrl), 500);
-    setInterval(() => checkForUpdate(updateUrl, 'checking', false), 60 * 1000);
-
 }).catch(error => {
     console.log(error)
-    dialog.showErrorBox('Server Error', 'Unfortunately, the jamovi server could not be started, and jamovi must now close. We regret the inconvenience.\n\nPlease report your experiences to the jamovi team.');
+    dialog.showErrorBox('Server Error', 'Unfortunately, the jamovi server could not be started, and jamovi must now close. We regret the inconvenience.\n\nMore information is available by visiting www.jamovi.org/troubleshooting.html');
     app.quit();
 });
 
@@ -442,32 +458,72 @@ app.on('second-instance', async(e, argv, wd) => {
     handleCommand(cmd);
 });
 
+const windowState = { };
+
+ipc.handle('get-config', (event, arg) => {
+    return clientConfig;
+});
+
+ipc.handle('show-message-box', async (event, options) => {
+    const webContents = event.sender;
+    const win = BrowserWindow.fromWebContents(webContents);
+    const { response } = await dialog.showMessageBox(win, options);
+    return response;
+});
+
+ipc.handle('copy-to-clipboard', (event, arg) => {
+    let { content } = arg;
+    if ('image' in content)
+        content.image = nativeImage.createFromDataURL(content.image);
+    clipboard.write(content);
+    return undefined;
+});
+
+ipc.handle('paste-from-clipboard', (event, arg) => {
+    const text = clipboard.readText();
+    const html = clipboard.readHTML();
+    return { text, html };
+});
+
+ipc.handle('show-open-dialog', (event, options) => {
+    return dialog.showOpenDialog(options);
+});
+
+ipc.handle('show-save-dialog', (event, options) => {
+    return dialog.showSaveDialog(options);
+});
+
+ipc.on('notify-return', (event, returned) => {
+    if (returned.type === 'close' && returned.value !== false) {
+        const webContents = event.sender;
+        const win = BrowserWindow.fromWebContents(webContents);
+        windowState[win.id].closing = true;
+        win.close();
+    }
+});
+
+ipc.handle('set-language', (event, code) => {
+    const webContents = event.sender;
+    webContents.session.setSpellCheckerLanguages([code]);
+});
+
 // handle requests sent from the browser instances
 ipc.on('request', (event, arg) => {
 
-    // locate the sender
-    let wind = null;
-    for (let i = 0; i < windows.length; i++) {
-        wind = windows[i];
-        if (wind.webContents === event.sender)
-            break;
-    }
-
-    if (wind === null)
-        return;
+    const webContents = event.sender;
+    const wind = BrowserWindow.fromWebContents(webContents);
 
     let eventType = arg.type;
     let eventData = arg.data;
 
     switch (eventType) {
-        case 'openDevTools':
-            wind.webContents.toggleDevTools();
+        case 'toggleDevTools':
+            webContents.toggleDevTools();
             break;
         case 'openWindow':
             createWindow({ id: eventData });
             break;
         case 'navigate':
-            // wind.loadURL(`${ rootUrl }${ eventData }/`);
             createWindow({ id: eventData, bounds: wind.getBounds() });
             wind.close();
             break;
@@ -483,9 +539,29 @@ ipc.on('request', (event, arg) => {
             else
                 wind.maximize();
             break;
-        //case 'openRecorder':
-        //    openRecorder(eventData);
-        //    break;
+        case 'setEdited':
+            wind.setDocumentEdited(eventData.edited);
+            break;
+        case 'setMenu':
+            const { template } = eventData;
+            const menu = Menu.buildFromTemplate(template);
+            Menu.setApplicationMenu(menu);
+            break;
+        case 'copyToClipboard':
+            const { content } = eventData;
+            if ('image' in content)
+                content.image = nativeImage.createFromDataURL(content.image);
+            clipboard.write(content);
+            break;
+        case 'zoom':
+            const { zoom } = eventData;
+            webContents.setZoomFactor(zoom);
+            break;
+        case 'openUrl':
+            const { url } = eventData;
+            if (url.startsWith('http://') || url.startsWith('https://'))
+                shell.openExternal(url);
+            break;
     }
 });
 
@@ -519,7 +595,7 @@ const createWindow = function(open) {
         y = open.bounds.y;
     }
 
-    let wind = new BrowserWindow({
+    const wind = new BrowserWindow({
         width, height, x, y,
         minWidth: 800,
         minHeight: 600,
@@ -534,6 +610,46 @@ const createWindow = function(open) {
         },
     });
 
+    windowState[wind.id] = { loading: false, closing: false };
+
+    const { webContents } = wind;
+
+    const beforeInputEvent = (event, input) => {
+
+        // intercept page refreshes, so we can differentiate between
+        // a page refresh, and a window close
+
+        if (input.type !== 'keyDown')
+            return;
+
+        if ((input.key === 'r' && input.meta)
+                || (input.key === 'F5')
+                || (input.key === 'r' && input.ctrlKey)) {
+            windowState[wind.id].loading = true;
+            wind.webContents.reload();
+        }
+    };
+
+    webContents.on('before-input-event', beforeInputEvent);
+
+    wind.on('close', (event) => {
+
+        // beforeunload is how we intercept window closes (prompt to save)
+        // but it also gets triggered for page refreshes. in general, the user
+        // shouldn't be able to refresh the page, but they're useful during
+        // development.
+
+        const state = windowState[wind.id];
+
+        if (state.closing !== true && state.loading !== true) {
+            webContents.send('notify', { type: 'close', data: { } });
+            event.preventDefault();
+        }
+        else {
+            webContents.removeListener('before-input-event', beforeInputEvent);
+        }
+    });
+
     // as of electron 1.7.9 on linux, drag and drop from the fs to electron
     // doesn't seem to work, the drop event is never fired. so we handle the
     // navigate event here to achieve the same thing
@@ -545,18 +661,6 @@ const createWindow = function(open) {
         }
     });
 
-    // if (recorderWindow !== null) {
-    //     let script = `window.notifyCurrentWindowChanged(${wind.id})`;
-    //     recorderWindow.webContents.executeJavaScript(script);
-    // }
-
-    // wind.on('focus', (event) => {
-    //     if (recorderWindow !== null) {
-    //         let script = `window.notifyCurrentWindowChanged(${event.sender.id})`;
-    //         recorderWindow.webContents.executeJavaScript(script);
-    //     }
-    // });
-
     wind.webContents.on('did-finish-load', (event) => {
         if (splash != null) {
             splash.close();
@@ -564,154 +668,39 @@ const createWindow = function(open) {
         }
     });
 
-    windows.push(wind);
-
     let url = rootUrl;
     if (open.id)
         url += open.id + '/';
+
+    if (accessKey)
+        url += `?access_key=${ accessKey }`;
+
     if (open.open) {
+
         let filePath = open.open;
-        if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
-            url = `${ url }?open=${ filePath }`;
-        }
-        else {
+        if ( ! (filePath.startsWith('http://') || filePath.startsWith('https://')))
             filePath = path.resolve(filePath);
-            url = `${ url }?open=${ encodeURIComponent(filePath) }`;
+
+        url = `${ url }#open?path=${ encodeURIComponent(filePath) }`;
+
+        if (open.temp) {
+            url = `${ url }&temp=1`;
+            if (open.title)
+                url = `${ url }&title=${ encodeURIComponent(open.title) }`;
         }
     }
 
-    wind.loadURL(url);
     // wind.openDevTools();
+    wind.loadURL(url);
 
-    wind.webContents.on('new-window', function(e, url) {
-        e.preventDefault();
-        electron.shell.openExternal(url);
-    });
-
-    wind.on('closed', (event) => {
-        windows = windows.filter(w => w != wind);
-        // if (windows.length === 0 && recorderWindow !== null) {
-        //     let recorder = recorderWindow;
-        //     // set it to null to really close
-        //     recorderWindow = null;
-        //     recorder.close();
-        // }
+    wind.webContents.setWindowOpenHandler((details) => {
+        const { url, disposition } = details;
+        if (disposition === 'foreground-tab') {
+            // i suppose insisting on the foreground-tab is better security?
+            shell.openExternal(url);
+        }
+        return { action: 'deny' };
     });
 };
 
-const updater = electron.autoUpdater;
 
-updater.on('error', () => {
-    notifyUpdateStatus('error');
-});
-
-updater.on('update-downloaded', () => {
-    notifyUpdateStatus('ready');
-});
-
-let lastUpdateCheck = new Date(0);
-
-const checkForUpdate = function(url, type='checking', force=true) {
-
-    if (process.platform !== 'darwin')  // only macOS for now
-        return;
-
-    let now = new Date()
-    if (force === false && (now - lastUpdateCheck) < 60 * 60 * 1000)
-        return;
-    lastUpdateCheck = now;
-
-    if (type === 'checking') {
-        const https = require('https');
-        let req = https.request(url);
-        req.end();
-        notifyUpdateStatus('checking');
-        req.on('response', (message) => {
-            if (message.statusCode === 204)
-                notifyUpdateStatus('uptodate');
-            else if (message.statusCode === 200)
-                notifyUpdateStatus('available');
-            else
-                notifyUpdateStatus('checkerror');
-        });
-        req.on('error', (error) => {
-            notifyUpdateStatus('checkerror');
-        });
-    }
-    else if (type === 'downloading') {
-        notifyUpdateStatus('downloading');
-        updater.setFeedURL(updateUrl);
-        updater.checkForUpdates();
-    }
-    else if (type === 'installing') {
-        updater.quitAndInstall();
-    }
-};
-
-const notifyUpdateStatus = function(status) {
-    setTimeout(() => {
-        try {
-            let response = 'notification: update ' + status + '\n';
-            server.stdin.write(response);
-        }
-        catch (e) {
-            // do nothing
-        }
-    });
-}
-
-/* const openRecorder = function(id) {
-    if (recorderWindow === null) {
-
-        // setting focusable to false seems only useful on macOS
-        // it's bad on windows, and completely useless on linux
-        let focusable = process.platform !== 'darwin';
-
-        // on linux, alwaysOnTop doesn't work, so it's better
-        // to leave it in the taskbar
-        let skipTaskbar = process.platform !== 'linux';
-
-        recorderWindow = new BrowserWindow({
-            show: false,
-            width: 340,
-            height: 240,
-            resizable: false,
-            minimizable: false,
-            maximizable: false,
-            alwaysOnTop: true,
-            fullscreenable: false,
-            focusable: focusable,
-            skipTaskbar: skipTaskbar,
-            vibrancy: 'titlebar',
-            acceptFirstMouse: true,
-            defaultEncoding: 'UTF-8',
-            webPreferences: {
-                nodeIntegration: true,
-            },
-        });
-
-        recorderWindow.loadURL(rootUrl + 'recorder.html');
-        recorderWindow.once('ready-to-show', () => {
-            let script = `window.notifyCurrentWindowChanged(${id})`;
-            recorderWindow.webContents.executeJavaScript(script);
-            recorderWindow.show();
-        });
-        recorderWindow.on('close', (event) => {
-            // set recorderWindow to null to close properly
-            if (recorderWindow !== null) {
-                recorderWindow.hide();
-                event.preventDefault();
-            }
-        })
-        recorderWindow.once('closed', (event) => {
-            recorderWindow = null;
-        });
-    }
-    else if (recorderWindow.isVisible()) {
-        recorderWindow.focus();
-        recorderWindow.flashFrame();
-    }
-    else {
-        recorderWindow.show();
-    }
-} */

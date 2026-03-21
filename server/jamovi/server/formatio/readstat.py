@@ -69,18 +69,31 @@ class Parser(ReadStatParser):
         # some times we don't get the level labels until after the columns and
         # data have been set up. this adds them on at the end (if necessary).
         for labels_key, column in self._columns_by_labels_key.items():
+            value_labels = self._tmp_value_labels.get(labels_key)
+            if value_labels is None:
+                continue
+            if column.data_type is DataType.DECIMAL:
+                column.determine_dps()
+                if column.dps == 0:
+                    column.change(data_type=DataType.INTEGER)
             if column.data_type is DataType.INTEGER:
-                value_labels = self._tmp_value_labels.get(labels_key)
-                if value_labels is None:
-                    continue
                 if column.measure_type is MeasureType.CONTINUOUS:
                     column.change(measure_type=MeasureType.NOMINAL)
                 levels = column.levels
                 for index, value_and_label in enumerate(levels):
                     new_label = value_labels.get(value_and_label[0])
                     if new_label is not None:
-                        levels[index] = (value_and_label[0], new_label, new_label)
+                        levels[index] = (value_and_label[0], new_label, new_label, True)
                 column.change(levels=levels)
+
+        weights_id = self._data.weights
+        if weights_id != 0:
+            try:
+                weights_name = self._data.get_column_by_id(weights_id).name
+                weights_analysis = self._data.analyses.create(id=0, name='weights', ns='jmv')
+                weights_analysis.set_weights(weights_name)
+            except KeyError:
+                pass
 
     def handle_metadata(self, metadata):
         if metadata.row_count >= 0:  # negative values are possible here!
@@ -98,7 +111,7 @@ class Parser(ReadStatParser):
         name = variable.name
         label = variable.label
 
-        column = self._data.append_column(name, name)
+        column = self._data.append_column(name)
         if label is not None:
             column.description = label
 
@@ -251,6 +264,13 @@ class Parser(ReadStatParser):
 
         if missings:
             column.set_missing_values(missings)
+
+    def handle_fweight(self, variable):
+        try:
+            weight_id = self._data[variable.name].id
+            self._data.set_weights(weight_id)
+        except KeyError:
+            pass
 
     def handle_value(self, var_index, row_index, value):
 

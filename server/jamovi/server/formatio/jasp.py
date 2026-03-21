@@ -89,7 +89,7 @@ def write(data, path, prog_cb, **kwargs):
         os.remove(temp_file.name)
 
 
-def read(data, path, prog_cb):
+def read(data, path, prog_cb, **kwargs):
 
     with ZipFile(path, 'r') as zip:
         # manifest = zip.read('META-INF/MANIFEST.MF')
@@ -99,7 +99,7 @@ def read(data, path, prog_cb):
         meta_dataset = metadata['dataSet']
 
         for meta_column in meta_dataset['fields']:
-            data.dataset.append_column(meta_column['name'])
+            data.append_column(meta_column['name'])
             column = data.dataset[data.dataset.column_count - 1]
 
             measure_type_str = meta_column['measureType']

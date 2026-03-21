@@ -1,4 +1,6 @@
 
+from __future__ import annotations
+
 from asyncio import wait
 from asyncio import create_task
 from asyncio import sleep
@@ -23,10 +25,12 @@ from jamovi.core import Dirs
 from .settings import Settings
 from .utils import conf
 from .notifications import SessionShutdownIdleNotification
+from .notifications import SessionShutdownTimeLimitNotification
 
 from .backend import NoBackend
 from .backend import FirestoreBackend
 from .backend import FileSystemBackend
+from .modules import Modules
 
 from logging import getLogger
 
@@ -51,18 +55,30 @@ class SessionEvent:
 
 class Session(dict):
 
-    def __init__(self, data_path, id):
+    _path: str
+    _id: str
+    _session_path: str
+    _session_temp: str
+    _analyses: SessionAnalyses
+    _analysis_listeners: list
+    _session_listeners: list
+    _running: bool
+    _ended: Event
+    _settings: Settings
+    _modules: Modules
+
+    def __init__(self, data_path: str, id: str):
         self._path = data_path
         self._id = id
         self._session_path = os.path.join(data_path, id)
-        self._update_status = 'na'
+        self._session_temp = os.path.join(self._session_path, 'temp')
         self._analyses = SessionAnalyses(self)
         self._analysis_listeners = [ ]
         self._session_listeners = [ ]
         self._running = False
         self._ended = Event()
 
-        self._settings = None
+        os.makedirs(self._session_temp, exist_ok=True)
 
         language = ''
 
@@ -70,23 +86,27 @@ class Session(dict):
         if backend_mode == 'file':
             settings_path = os.path.join(Dirs.app_data_dir(), 'settings.json')
             self._backend = FileSystemBackend(settings_path=settings_path)
-
-            # with a file backend, we need to read the settings straight away
-            # to get the language
-            settings = self.get_settings_nowait()
-            language = settings.group('main').get('selectedLanguage', '')
         elif backend_mode == 'firestore':
             backend_url = conf.get('backend_url')
             self._backend = FirestoreBackend(firestore_url=backend_url)
         else:
             self._backend = NoBackend()
 
+        self._settings = Settings(backend=self._backend)
+        self._specify_defaults(self._settings)
+
+        if backend_mode == 'file':
+            self._settings.read_nowait()
+            language = self._settings.group('main').get('selectedLanguage', '')
+
+        self._modules = Modules(self._settings.group('modules'))
+
         if language == '':
             language = conf.get('lang', '')
         if language != '':
             i18n.set_language(language)
 
-        self._scheduler = Scheduler(1, 3, self._analyses)
+        self._scheduler = Scheduler(1, 3, self._analyses, self._modules)
 
         task_queue_url = conf.get('task_queue_url')
         if task_queue_url is not None:
@@ -98,6 +118,7 @@ class Session(dict):
         self._runner.add_engine_listener(self._on_engine_event)
 
     async def start(self):
+        await self._modules.read()
         await self._runner.start()
         t = create_task(self._run_loop())
         t.add_done_callback(lambda t: t.result())
@@ -112,6 +133,10 @@ class Session(dict):
     def id(self):
         return self._id
 
+    @property
+    def modules(self):
+        return self._modules
+
     def set_language(self, lang):
         if i18n.get_language() is None:  # if the language has already been set from conf then leave it alone
             i18n.set_language(lang)
@@ -122,21 +147,12 @@ class Session(dict):
     def set_auth(self, auth_token):
         self._backend.set_auth(auth_token)
 
-    def get_settings_nowait(self):
-        if self._settings is None:
-            self._settings = Settings(backend=self._backend)
-            self._specify_defaults(self._settings)
-            self._settings.read_nowait()
-        return self._settings
-
-    async def get_settings(self):
-        if self._settings is None:
-            self._settings = Settings(backend=self._backend)
-            self._specify_defaults(self._settings)
-            await self._settings.read()
-        return self._settings
-
     def apply_settings(self, settings: dict):
+        if 'updateStatus' in settings:
+            update_status = settings['updateStatus']
+            if (update_status != self.update_status
+                    and (update_status == 'checking' or update_status == 'downloading')):
+                self.request_update(update_status)
         self._settings.apply({ 'main': settings })
         self.notify_global_changes()
 
@@ -148,14 +164,19 @@ class Session(dict):
         settings.group('main').specify_default('autoUpdate', def4ult)
         settings.group('main').specify_default('missings', 'NA')
         settings.group('main').specify_default('selectedLanguage', '')
+        settings.group('main').specify_default('updateStatus', 'na')
 
     async def create(self, instance_id=None):
+
+        # the auth token should have been set by now,
+        # so we can read the settings
+        await self._settings.read()
+
         if instance_id is None:
             instance_id = str(uuid.uuid4())
-        log.info('%s %s', 'creating instance:', instance_id)
+
         instance_path = os.path.join(self._session_path, instance_id)
-        settings = await self.get_settings()
-        instance = Instance(self, instance_path, instance_id, settings)
+        instance = Instance(self, instance_path, instance_id, self._settings)
         instance.analyses.add_options_changed_listener(self._options_changed_handler)
         self[instance_id] = instance
         self._notify_session_event(SessionEvent.Type.INSTANCE_STARTED, instance_id)
@@ -209,18 +230,23 @@ class Session(dict):
 
     @property
     def update_status(self):
-        return self._update_status
+        main_settings = self._settings.group('main').get('updateStatus', 'na')
 
     @property
     def session_path(self):
         return self._session_path
 
+    @property
+    def session_temp(self) -> str:
+        return self._session_temp
+
     def set_update_status(self, status):
-        self._update_status = status
+
+        main_settings = self._settings.group('main')
+        main_settings.set('updateStatus', status)
         self.notify_global_changes()
 
         if status == 'available':
-            main_settings = self._settings.group('main')
             if main_settings.get('autoUpdate', False):
                 self.request_update('downloading')
 
@@ -233,6 +259,12 @@ class Session(dict):
         self._running = False
 
     async def _run_loop(self):
+
+        try:
+            TIME_LIMIT = conf.get('time_limit', '')
+            TIME_LIMIT = int(TIME_LIMIT)
+        except Exception:
+            TIME_LIMIT = None
 
         try:
             TIMEOUT_NC = conf.get('timeout_no_connection', '')
@@ -286,14 +318,17 @@ class Session(dict):
             TIMEOUT_IDLE_NOTICE = conf.get('timeout_idle_notice', '')
             TIMEOUT_IDLE_NOTICE = float(TIMEOUT_IDLE_NOTICE)
         except Exception:
-            TIMEOUT_IDLE_NOTICE = 0
+            TIMEOUT_IDLE_NOTICE = 300
 
         now = monotonic()
+
+        session_start_time = now
         session_no_connection_since = now
         session_no_connection_unclean = False
         session_idle_since = now
         idle_warning_since = None
         last_idle_warning = None
+        last_time_limit_warning = None
 
         self._running = True
 
@@ -333,7 +368,7 @@ class Session(dict):
                         if ((status.unclean and no_conn_for > TIMEOUT_NC_UNCLEAN)
                                 or (status.virgin is True and no_conn_for > TIMEOUT_NC_VIRGIN)
                                 or (status.virgin is False and status.unclean is False and no_conn_for > TIMEOUT_NC)):
-                            log.info('%s %s', 'destroying instance:', id)
+
                             self._notify_session_event(SessionEvent.Type.INSTANCE_ENDED, id)
                             instance.close()
                             del self[id]
@@ -353,7 +388,7 @@ class Session(dict):
                     # and no connections for a while, end the session
                     if ((session_no_connection_unclean and no_conn_for > TIMEOUT_NC_UNCLEAN)
                             or (session_no_connection_unclean is False and no_conn_for > TIMEOUT_NC)):
-                        log.info('%s %s', 'ending session:', self._id)
+                        log.info('ending session: idle')
                         self.stop()
 
                 # now determine, notify, or end the session if the idle
@@ -364,6 +399,7 @@ class Session(dict):
                     # do nothing
                     pass
                 elif idle_for > TIMEOUT_IDLE:
+                    log.info('ending session: idle')
                     self.stop()
                 elif idle_for > (TIMEOUT_IDLE - TIMEOUT_IDLE_NOTICE):
                     # notify session is idle
@@ -383,6 +419,21 @@ class Session(dict):
                         self._notify(notif)
                         idle_warning_since = None
                         last_idle_warning = None
+
+                if TIME_LIMIT and now - session_start_time > TIME_LIMIT - TIMEOUT_IDLE_NOTICE:
+                    if now - session_start_time > TIME_LIMIT:
+                        log.info('ending session: exceeded time limit')
+                        self.stop()
+                    elif last_time_limit_warning is None:
+                        shutdown_in = TIME_LIMIT - (now - session_start_time)
+                        notif = SessionShutdownTimeLimitNotification(shutdown_in=shutdown_in)
+                        self._notify(notif)
+                        last_time_limit_warning = now
+                    elif now - last_time_limit_warning > 30:
+                        shutdown_in = TIME_LIMIT - (now - session_start_time)
+                        notif = SessionShutdownTimeLimitNotification(shutdown_in=shutdown_in)
+                        self._notify(notif)
+                        last_time_limit_warning += 30
         finally:
             if self._settings is not None:
                 try:

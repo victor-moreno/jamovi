@@ -12,14 +12,15 @@
 
 typedef struct
 {
-    int columnCount; // columns used
-    int rowCount;
+    int volatile columnCount; // columns used
+    int volatile rowCount;
     ColumnStruct ** volatile columns;
-    int capacity;  // size of columns array
-    int nextColumnId;
-    ColumnStruct *scratch;
-    int rowCountExFiltered;
-    ColumnStruct *indices;
+    int volatile capacity;  // size of columns array
+    int volatile nextColumnId;
+    ColumnStruct * volatile scratch;
+    int volatile rowCountExFiltered;
+    ColumnStruct * volatile indices;
+    int volatile weights;
 
 } DataSetStruct;
 
@@ -39,6 +40,9 @@ public:
     Column operator[](int index);
     Column operator[](const char *name);
     Column getColumnById(int id);
+    bool hasWeights();
+    Column weights();
+    const char* weightsName();
 
 protected:
 

@@ -1,6 +1,11 @@
 
 # flake8: noqa
 
+import os.path
+import ssl
+
+import certifi
+
 from .csvparser import CSVParser
 from .htmlparser import HTMLParser
 
@@ -8,9 +13,7 @@ from .fileentry import FileEntry
 from .nulllog import NullLog
 from .latexify import latexify
 from .stream import ProgressStream
-
-import os.path
-import ssl
+from .describe import describe_datasetrr
 
 
 def int32(value):
@@ -53,11 +56,11 @@ def req_str(request):
         request.name,
         perform)
 
+
+context = None
+
 def ssl_context():
-    context = None
-    server_path = conf.get('server_path')
-    if server_path is not None:
-        chain_path = os.path.join(server_path, 'resources', 'chain.pem')
-        if os.path.isfile(chain_path):
-            context = ssl.create_default_context(cafile=chain_path)
+    global context
+    if context is None:
+        context = ssl.create_default_context(cafile=certifi.where())
     return context

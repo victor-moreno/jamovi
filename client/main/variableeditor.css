@@ -2,6 +2,10 @@
  * Copyright (C) 2016 Jonathon Love
  */
 
+.jmv-variable-editor > .shortcut-key-tag {
+    top: 50px;
+    inset-inline-start: 20%;
+}
 
 .jmv-variable-editor .hover-header {
     width: 100%;
@@ -13,13 +17,14 @@
     background-color: #F8F8F8 ;
     width: 100% ;
     height: 300px ;
-    transition: height .2s, width .2s, border-top .2s, background-color .2s, opacity .2s, margin .2s;
+    transition: height .2s, width .2s, border-top .2s, background-color .2s, opacity .2s, margin .2s, visibility .2s;
     box-sizing: border-box;
     border-top: 1px solid #CCCCCC ;
     position: relative;
     grid-area: 1 / 1 / span 1 / span 5;
     border-bottom: 1px solid #CCCCCC;
     margin-bottom: 6px;
+    visibility: visible;
 }
 
 .jmv-variable-editor.sub-editor-open {
@@ -36,12 +41,13 @@
     border-top: 1px solid #F0F0F0 ;
     opacity: 0;
     margin-bottom: 0px;
+    visibility: hidden;
 }
 
 .jmv-variable-editor-main {
     position: relative ;
     margin: 0 auto ;
-    width: 700px ;
+    width: 800px ;
     height: 100% ;
     box-sizing: border-box;
     overflow: hidden ;
@@ -49,7 +55,7 @@
 
 .jmv-variable-editor-ok {
     position: absolute ;
-    right: 12px ;
+    inset-inline-end: 12px ;
     top: 12px ;
     width: 40px ;
     height: 40px ;
@@ -60,34 +66,6 @@
     font-size: 24px ;
     text-align: center;
     transition: color .2s, border-color .2s ;
-}
-
-.jmv-variable-editor-revert {
-    position: absolute ;
-    right: 16px ;
-    top: 58px ;
-    width: 26px ;
-    height: 26px ;
-    color: #BBBBBB ;
-    border: 3px solid #BBBBBB ;
-    border-radius: 13px ;
-    box-sizing: border-box;
-    font-size: 13px ;
-    text-align: center;
-    font-weight: bold ;
-    transition: opacity .4s ;
-    opacity: 0 ;
-}
-
-.jmv-variable-editor-revert span {
-    line-height: 20px;
-    vertical-align: top;
-}
-
-.jmv-variable-editor-revert.apply {
-    opacity: 1 ;
-    color: #AAAAAA ;
-    border-color: #AAAAAA;
 }
 
 .jmv-variable-editor-ok span.mif-checkmark {
@@ -101,11 +79,11 @@
 
 .jmv-variable-editor-ok span {
     position: absolute ;
-    left: 0 ;
+    inset-inline-start: 0 ;
+    top: 0;
     width: 100% ;
     line-height: 32px;
     vertical-align: top;
-    /*margin-top: 4px ;*/
     transition: opacity .4s ;
 }
 
@@ -119,13 +97,16 @@
 
 .jmv-variable-editor-button-left,
 .jmv-variable-editor-button-right {
-    position: absolute ;
-    width: 40px ;
-    height: 40px ;
-    top: 130px ;
-    font-size: 40px ;
-    color: #BBBBBB ;
-    transition: opacity .2s ;
+    position: absolute;
+    width: 40px;
+    height: 40px;
+    top: 130px;
+    font-size: 40px;
+    color: #BBBBBB;
+    border: none;
+    background-color: inherit;
+    padding: 0px;
+    transition: opacity .2s;
 }
 
 .jmv-variable-editor-button-left span,
@@ -140,7 +121,6 @@
 }
 
 .jmv-variable-editor-ok:hover,
-.jmv-variable-editor-revert:hover,
 .jmv-variable-editor-button-left:hover,
 .jmv-variable-editor-button-right:hover {
     color: #999999 ;
@@ -148,11 +128,11 @@
 }
 
 .jmv-variable-editor-button-left {
-    left: 10px ;
+    inset-inline-start: 10px ;
 }
 
 .jmv-variable-editor-button-right {
-    right: 10px ;
+    inset-inline-end: 10px ;
 }
 
 .jmv-variable-editor-widget.multiple-variables .single-variable-support {
@@ -170,7 +150,7 @@
 }
 
 .jmv-variable-editor-widget:not(.inactive) {
-    transition: left .3s, opacity .3s ;
+    transition: left .3s, inset-inline-start .3s, opacity .3s, visibility .3s ;
 }
 
 .jmv-variable-editor-widget .desc-box {
@@ -205,7 +185,6 @@
     box-sizing: content-box;
     overflow: hidden;
     height: 36px;
-    /*margin-top: 3px;*/
 }
 
 .jmv-variable-editor-widget .desc-box .multi-var-info .multi-var-info-list {
@@ -219,12 +198,12 @@
 
 .jmv-variable-editor-widget .desc-box .multi-var-info .multi-var-info-list .jmv-variable-list-item {
     background-color: #E8E8E8;
-    margin-right: 3px;
+    margin-inline-end: 3px;
     min-width: unset;
 }
 
 .jmv-variable-editor-widget .desc-box .multi-var-info .multi-var-info-list .jmv-variable-list-item > .label {
-    margin-right: 7px;
+    margin-inline-end: 7px;
     max-width: 77px;
     white-space: nowrap;
     text-overflow: ellipsis;
@@ -232,7 +211,10 @@
 }
 
 .jmv-variable-editor-widget .desc-box .multi-var-info .multi-var-info-label {
-    margin: 0 5px 0 2px;
+    margin-top: 0px;
+    margin-bottom: 0px;
+    margin-inline-start: 2px;
+    margin-inline-end: 5px;
     color: #888888;
     font-weight: 100;
 }
@@ -242,7 +224,10 @@
     color: #555555 ;
     background-color: white;
     padding: 3px 4px 3px 4px;
-    margin: 3px 37px 0px 0px;
+    margin-top: 3px;
+    margin-bottom: 0px;
+    margin-inline-start: 0px;
+    margin-inline-end: 37px;
     border: 1px solid #CCCCCC;
     flex-shrink: 0;
     flex-grow: 0;
@@ -253,7 +238,10 @@
     color: #555555 ;
     background-color: white;
     padding: 3px 4px 3px 4px;
-    margin: 3px 37px 0px 0px;
+    margin-top: 3px;
+    margin-bottom: 0px;
+    margin-inline-start: 0px;
+    margin-inline-end: 37px;
     border: 1px solid #CCCCCC;
     max-height: 3.2em;
     overflow: auto;
@@ -265,7 +253,7 @@
 .label-box {
     display: flex;
     flex-direction: row;
-    margin-right: 37px;
+    margin-inline-end: 37px;
     align-items: center;
     flex-shrink: 0;
     flex-grow: 0;
@@ -285,14 +273,14 @@
 
 .label-box .imported-as > .label {
     color: grey;
-    margin-right: 5px;
+    margin-inline-end: 5px;
     font-weight: 100;
     font-size: 90%;
 }
 
 .label-box .imported-as > .name {
     color: grey;
-    margin-right: 5px;
+    margin-inline-end: 5px;
     font-size: 90%;
     font-weight: 500;
 }
@@ -300,7 +288,10 @@
 .label-box .jmv-variable-editor-widget-label {
     font-size: 110%;
     color: #555555;
-    padding: 0px 4px 0px 2px;
+    padding-top: 0px;
+    padding-inline-end: 4px;
+    padding-bottom: 0px;
+    padding-inline-start: 2px;
     margin: 0px;
     font-weight: 100;
     text-transform: uppercase;
@@ -310,7 +301,10 @@
     flex-grow: 1;
     display: flex;
     overflow: hidden;
-    padding: 10px 10px 10px 0px;
+    padding-top: 10px;
+    padding-inline-end: 10px;
+    padding-bottom: 10px;
+    padding-inline-start: 0px;
 }
 
 .jmv-datavarwidget-body {
@@ -319,88 +313,123 @@
 }
 
 .jmv-variable-editor-widget-footer {
-    margin-left: 2px;
-    margin-right: 37px;
+    margin-inline-start: 2px;
+    margin-inline-end: 37px;
 }
 
 .jmv-variable-editor-main[data-type='output'] .jmv-variable-editor-widget-title {
-    margin-right: 10px;
+    margin-inline-end: 10px;
 }
 
 .jmv-variable-editor-main[data-type='output'] .jmv-variable-editor-widget-description {
-    margin-right: 10px;
+    margin-inline-end: 10px;
 }
 
 .jmv-variable-editor-main[data-type='computed'] .jmv-variable-editor-widget-footer {
-    margin-right: 10px;
+    margin-inline-end: 10px;
 }
 
 .jmv-variable-editor-main[data-type='computed'] .jmv-variable-editor-widget-title {
-    margin-right: 10px;
+    margin-inline-end: 10px;
 }
 
 .jmv-variable-editor-main[data-type='computed'] .jmv-variable-editor-widget-description {
-    margin-right: 10px;
+    margin-inline-end: 10px;
 }
 
 .jmv-variable-editor-main[data-type='computed'] .label-box {
-    margin-right: 10px
+    margin-inline-end: 10px
 }
 
 .jmv-variable-editor-main[data-type='filter'] .label-box .jmv-variable-editor-widget-label {
-    margin-left: 3px;
+    margin-inline-start: 3px;
 }
-
-
 
 .jmv-variable-editor-widget-footer > .status-box {
     display: flex;
     flex-direction: row-reverse;
     align-items: center;
-    float: right;
+    float: inline-end;
 }
 
 .jmv-variable-editor-widget-footer > .status-box > .status {
     color: #757575;
-    margin: 2px 0px 2px 3px;
-    padding-right: 3px;
+    margin-top: 2px;
+    margin-bottom: 2px;
+    margin-inline-start: 0px;
+    margin-inline-end: 3px;
+    padding-inline-end: 3px;
     height: 18px;
     line-height: 18px;
-    text-align: right;
-
+    text-align: end;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    position: relative;
+    gap: 1ch;
 }
 
-.jmv-variable-editor-widget-footer .status-box:hover .active {
-    background-color: #bcbcbc;
+
+.jmv-variable-editor-widget-footer .active {
+    position: absolute;
+    opacity: 0;
+    width: 100%;
+    height: 100%;
 }
 
-.jmv-variable-editor-widget-footer .active.retain-levels {
+.jmv-variable-editor-widget-footer .switch {
+    --offset: 2px;
+    --diameter: 10px;
+
+    display: inline-flex;
+    align-items: center;
+    justify-content: space-around;
+    box-sizing: content-box;
+    width: calc(var(--diameter) * 2 + var(--offset) * 2);
+    height: calc(var(--diameter) + var(--offset) * 2);
+    position: relative;
+    border-radius: 100vw;
+    background-color: #cccccc;
+    transition: background-color 0.1s ease-out, transform 0.1s ease-out;
+}
+
+.jmv-variable-editor-widget-footer .active.retain-levels + .switch {
     background-color: #8cc18c;
 }
 
-.jmv-variable-editor-widget-footer .status-box:hover .active.retain-levels {
+.jmv-variable-editor-widget-footer .active.retain-levels + .switch::before {
+    transform: translate(100%, -50%);
+}
+
+.jmv-variable-editor-widget-footer .active:focus + .switch {
+    outline: 1px dotted #212121;
+    outline: 1px auto -webkit-focus-ring-color;
+    outline-offset: 2px;
+}
+
+.jmv-variable-editor-widget-footer .active:focus:not(:focus-visible) + .switch {
+    outline: 0;
+}
+
+.jmv-variable-editor-widget-footer .switch::before {
+    content: "";
+    position: absolute;
+    top: calc(var(--diameter) / 2 + var(--offset) / 2 + 0.5px);
+    inset-inline-start: var(--offset);
+    box-sizing: border-box;
+    width: var(--diameter);
+    height: var(--diameter);
+    border-radius: 50%;
+    background-color: white;
+    transform: translate(0, -50%);
+    will-change: transform;
+    transition: inherit;
+}
+
+.jmv-variable-editor-widget-footer .active + .switch:hover {
+    background-color: #bcbcbc;
+}
+
+.jmv-variable-editor-widget-footer .active.retain-levels + .switch:hover {
     background-color: #659c65;
-}
-
-.jmv-variable-editor-widget-footer .active.retain-levels .switch {
-    left: 9px;
-}
-
-.jmv-variable-editor-widget-footer .active {
-    width: 25px;
-    height: 14px;
-    background-color: #cccccc;
-    border-radius: 9px;
-    margin: 0px 0px 0px 2px;
-}
-
-.jmv-variable-editor-widget-footer .active .switch {
-    position: relative;
-    width: 12px;
-    height: 10px;
-    left: 0px;
-    background-color: #ffffff;
-    border-radius: inherit;
-    margin: 2px 2px 2px 2px;
-    transition: .1s left ease-out;
 }

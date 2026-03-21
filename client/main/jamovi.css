@@ -29,8 +29,30 @@ body {
     background-color: #3E6DA9 ;
     padding: 0 ;
     cursor: default ;
-    display: flex ;
-    flex-flow: column ;
+}
+
+:focus {
+    /*outline-color: #4e5966;*/
+}
+
+[focusmode="default"] :focus {
+  outline: none
+}
+
+[focusmode="hover"] :focus {
+    outline: none;
+}
+
+jmv-safari-button:focus {
+  outline: 2px solid Highlight;
+  outline-offset: 2px;
+}
+
+#main {
+    display: grid;
+    height: 100%;
+    grid-template-rows: auto min-content 1fr;
+    grid-template-columns: 100%;
 }
 
 body.windows.electron {
@@ -56,6 +78,35 @@ hr {
     color: white ;
     text-align: center ;
     min-height: 6px ;
+    height: 0px;
+}
+
+.upgrade-button {
+    padding: 6px 20px;
+    background-color: #3e6da9;
+    border: 1px solid #3e6da9;
+    color: white;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.upgrade-button.light {
+    color: white;
+    border: 1px solid #c1dbff;
+    color: #3e6da9;
+    background-color: white;
+}
+
+.upgrade-button:hover {
+    background-color: #5e8bc5;
+}
+
+.upgrade-button.light:hover {
+    background-color: #f3f8ff;
+}
+
+.upgrade-button:active {
+    background-color: #555555;
 }
 
 body.windows.electron #header {
@@ -126,8 +177,8 @@ body[data-table-mode='spreadsheet'] #main-view #spreadsheet {
 
 body.windows.electron #header-text {
     display: block ;
-    margin-left: 80px ;
-    margin-right: 150px ;
+    margin-inline-start: 80px ;
+    margin-inline-end: 150px ;
     display: block;
 }
 
@@ -139,7 +190,7 @@ body.windows.electron #header-text {
     z-index: 200 ;
     position: fixed;
     top: 1px;
-    right: 1px;
+    inset-inline-end: 1px;
     display: none ;
     height: 31px;
 }
@@ -201,7 +252,7 @@ body.windows.electron #header-buttons {
 #main-view {
     padding-top: 6px ;
     border-top: 1px solid #D0D0D0 ;
-    background-color: #E6E6E6 ;
+    background: linear-gradient(#d8d8d8, #E6E6E6 5px);
     flex-grow: 1;
     display: grid;
     grid-template-rows: minmax(0px, min-content) 1fr;
@@ -229,8 +280,13 @@ body.windows.electron #header-buttons {
     width: 0px !important;
     opacity: 0 !important;
     min-width: 0px !important;
+    visibility: hidden;
 }
 
+#results > .shortcut-key-tag, #main-options > .shortcut-key-tag {
+    top: 3px;
+    inset-inline-start: 3px;
+}
 
 #results {
     font-style: sans-serif ;
@@ -277,7 +333,7 @@ body.windows.electron #header-buttons {
 
 #progress-bar-helper {
     position: absolute ;
-    left: 0 ;
+    inset-inline-start: 0 ;
     top: 0 ;
     display: table ;
     width: 100% ;
@@ -305,8 +361,24 @@ body.windows.electron #header-buttons {
     height: 100% ;
     top : 0 ;
     padding: 12px 0 ;
-    right: 12px ;
+    inset-inline-end: 12px ;
     box-sizing: border-box;
-    z-index: 110 ;
+    z-index: 310 ;
     white-space: pre;
+}
+
+.tarp {
+    width: 100% ;
+    height: 100% ;
+    position: absolute ;
+    top: 0 ;
+    inset-inline-start: 0 ;
+    background-color: rgba(0, 0, 0, 0.4);
+    display: none ;
+    backdrop-filter: blur(1px);
+    
+}
+
+jmv-headeralert.visible ~ .tarp {
+    top: 40px ;
 }

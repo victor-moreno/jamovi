@@ -18,6 +18,9 @@
     text-align: center;
     margin: 7px;
     color: #214067;
+    border: none;
+    padding: 0px;
+    align-items: stretch;
 }
 
 .jmv-variable-new-container > .button > .icon {
@@ -27,7 +30,7 @@
     background-size: 50%;
     background-repeat: no-repeat;
     background-position: center;
-    margin-right: 2px;
+    margin-inline-end: 2px;
     background-color: #cadaf3;
     border: 1px solid transparent;
     transition: .2s background-color ease-out, .2s border-color ease-out;
@@ -53,4 +56,16 @@
 .jmv-variable-new-container > .button:hover > .text {
     background-color: #e6ebf3;
     border: 1px solid #cadaf3;
+}
+
+.jmv-variable-new-container .data-variable .icon {
+    background-image: url('../../assets/variable-nominal.svg');
+}
+
+.jmv-variable-new-container .computed-variable .icon {
+    background-image: url('../../assets/variable-computed.svg');
+}
+
+.jmv-variable-new-container .transformed-variable .icon {
+    background-image: url('../../assets/menu-data-transform.svg');
 }

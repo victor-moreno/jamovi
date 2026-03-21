@@ -434,10 +434,7 @@ void ColumnW::insertLevel(int value, const char *label, const char *importValue,
             descending = false;
     }
 
-    if (ascending && descending)
-        descending = false;
-
-    if (ascending == false && descending == false)
+    if (ascending == descending)
     {
         // if the levels are neither ascending nor descending
         // then just add the level to the end
@@ -782,7 +779,10 @@ void ColumnW::changeDMType(DataType::Type dataType, MeasureType::Type measureTyp
             for (int rowNo = 0; rowNo < rowCount(); rowNo++)
             {
                 const char *value = old.svalue(rowNo);
-                setSValue(rowNo, value, true);
+                string copy = string(value);
+                // value is in shared memory, which may move if setSValue
+                // results in a segment enlargement, so we make a copy
+                setSValue(rowNo, copy.c_str(), true);
             }
         }
         else
@@ -805,8 +805,10 @@ void ColumnW::changeDMType(DataType::Type dataType, MeasureType::Type measureTyp
     }
     else if (dataType == DataType::DECIMAL)
     {
+        bool isEuroFloatColumn = old.isEuroDecimalTextColumn();
+
         for (int rowNo = 0; rowNo < old.rowCount(); rowNo++)
-            setDValue(rowNo, old.dvalue(rowNo), true);
+            setDValue(rowNo, old.dvalue(rowNo, isEuroFloatColumn), true);
     }
 }
 

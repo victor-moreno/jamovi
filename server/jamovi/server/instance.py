@@ -6,7 +6,6 @@ from jamovi.core import ColumnType
 from jamovi.core import DataType
 from jamovi.core import MeasureType
 from jamovi.core import Dirs
-from jamovi.core import MemoryMap
 from jamovi.core import DataSet
 
 from . import jamovi_pb2 as jcoms
@@ -17,12 +16,17 @@ from .utils import CSVParser
 from .utils import HTMLParser
 from .utils import ssl_context
 from .utils.stream import ProgressStream
-from .modules import Modules
 from .instancemodel import InstanceModel
 from . import formatio
 from .modtracker import ModTracker
 from .permissions import Permissions
-from .integrations import get_special_handler
+
+from .exceptions import FileExistsException
+from .exceptions import UserException
+
+from .syncs import create_file_sync
+from .syncs import HttpSync
+from .syncs import HttpSyncFileInfo
 
 import os
 import os.path
@@ -30,30 +34,41 @@ import platform
 import re
 import posixpath
 import math
-import yaml
 import logging
 import asyncio
 import functools
 from time import monotonic
 from itertools import islice
 from urllib import parse
+
 from aiohttp import ClientSession
+from aiohttp import TCPConnector
+from ipaddress import ip_address
+
 from asyncio import ensure_future as create_task
+from asyncio import wait
+
 from collections import namedtuple
 
 from tempfile import NamedTemporaryFile
 from tempfile import mktemp
 from tempfile import mkstemp
 
+from .dataset import StoreFactory
+
 from .utils import fs
 from .utils import is_int32
 from .utils import is_url
 from .utils import latexify
+from .utils import describe_datasetrr
 from .i18n import _
 
 
-log = logging.getLogger(__name__)
+EURO_REGEX = re.compile(r'^\d+,\d+$')
 
+
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
 
 class ForbiddenOp(PermissionError):
     def __init__(self, operation, message):
@@ -62,11 +77,13 @@ class ForbiddenOp(PermissionError):
 
 
 ConnectionStatus = namedtuple('ConnectionStatus',
-    ('connected', 'inactive_since', 'unclean', 'virgin'),
-    defaults=(True, None, False, False))
+                              ('connected', 'inactive_since', 'unclean', 'virgin'),
+                              defaults=(True, None, False, False))
 
 
 class Instance:
+
+    _file_sync_client: ClientSession
 
     def __init__(self, session, instance_path, instance_id, settings):
 
@@ -75,7 +92,10 @@ class Instance:
         self._instance_id = instance_id
         self._settings = settings
 
-        os.makedirs(instance_path, exist_ok=True)
+        self._file_sync_client = None
+
+        os.makedirs(self._instance_path, exist_ok=True)
+        os.makedirs(self.temp_path(), exist_ok=True)
         self._buffer_path = posixpath.join(instance_path, 'buffer')
 
         self._mm = None
@@ -93,8 +113,9 @@ class Instance:
 
         self._data.analyses.add_results_changed_listener(self._on_results)
         self._data.analyses.add_output_received_listener(self._on_output_received)
+        self._data.analyses.weights_changed += self._on_weights_changed
 
-        Modules.instance().add_listener(self._module_event)
+        self._session.modules.add_listener(self._module_event)
 
         handler = Instance.LogHandler(self)
         handler.setLevel('DEBUG')
@@ -107,7 +128,6 @@ class Instance:
         main_settings = self._settings.group('main')
         main_settings.changed += self._main_settings_changed
 
-
     @property
     def id(self):
         return self._instance_id
@@ -117,13 +137,15 @@ class Instance:
         return self._session
 
     def _normalise_path(self, path):
-        nor_path = path
+
         if path.startswith('{{Temp}}'):
             base = os.path.basename(path)
             base, ext = os.path.splitext(base)
             temp_path = self.temp_path()
             os.makedirs(temp_path, exist_ok=True)
             nor_path = mktemp(suffix=ext, dir=temp_path)
+        elif path.startswith('{{SessionTemp}}'):
+            nor_path = path.replace('{{SessionTemp}}', self._session.session_temp, 1)
         elif path.startswith('{{Documents}}'):
             nor_path = path.replace('{{Documents}}', Dirs.documents_dir())
         elif path.startswith('{{Downloads}}'):
@@ -133,7 +155,7 @@ class Instance:
         elif path.startswith('{{Home}}'):
             nor_path = path.replace('{{Home}}', Dirs.home_dir())
         elif path.startswith('{{Examples}}'):
-            modules = Modules.instance()
+            modules = self._session.modules
             if path == '{{Examples}}':
                 module = modules['jmv']
                 nor_path = posixpath.join(module.path, 'data')
@@ -151,6 +173,8 @@ class Instance:
                     # return something default-y, let somewhere else error
                     module = modules['jmv']
                     nor_path = posixpath.join(module.path, 'data')
+        else:
+            nor_path = path
 
         return nor_path
 
@@ -194,7 +218,7 @@ class Instance:
         return path
 
     def _module_event(self, event):
-        if event['type'] == 'moduleInstalled':
+        if event['type'] == 'moduleUpdated':
             module_name = event['data']['name']
 
             broadcast = jcoms.ModuleRR()
@@ -217,7 +241,7 @@ class Instance:
         self._virgin = False
 
     def close(self):
-        Modules.instance().remove_listener(self._module_event)
+        self._session.modules.remove_listener(self._module_event)
         if self._mm is not None:
             self._mm.close()
 
@@ -235,11 +259,10 @@ class Instance:
         if self._no_connection_since is None:
             return ConnectionStatus()
         else:
-            return ConnectionStatus(
-                    False,
-                    self._no_connection_since,
-                    self._no_connection_unclean_disconnect,
-                    self._virgin)
+            return ConnectionStatus(False,
+                                    self._no_connection_since,
+                                    self._no_connection_unclean_disconnect,
+                                    self._virgin)
 
     def idle_for(self):
         return monotonic() - self._idle_since
@@ -266,8 +289,6 @@ class Instance:
             self._on_dataset(request)
         elif type(request) == jcoms.OpenRequest:
             await self._on_open(request)
-        elif type(request) == jcoms.SaveRequest:
-            await self._on_save(request)
         elif type(request) == jcoms.InfoRequest:
             self._on_info(request)
         elif type(request) == jcoms.SettingsRequest:
@@ -288,7 +309,7 @@ class Instance:
         if self._coms is not None:
             self._coms.send(analysis.results, self._instance_id, complete=analysis.complete)
 
-    def _on_output_received(self, outputs):
+    def _on_output_received(self, analysis, outputs):
 
         def gen_output_column_name(desired_name):
             name = desired_name
@@ -304,6 +325,10 @@ class Instance:
                     # it's unique, phew!
                     break
             return name
+
+        changed = set()
+        renamed = dict()
+        rows_added_removed = False
 
         try:
             response = None
@@ -332,6 +357,8 @@ class Instance:
 
                 # add new columns
 
+                final_names = [ ]
+
                 for output in option_outputs.outputs:
 
                     desired_name = output.title
@@ -354,6 +381,7 @@ class Instance:
                         if column.name == column.output_assigned_column_name:  # user hasn't changed the name
                             if column.output_desired_column_name != desired_name:  # but analysis has changed the name
                                 name = gen_output_column_name(desired_name)
+                                renamed[column.name] = name
                                 column.name = name
                                 column.description = output.description
                                 column.output_assigned_column_name = name
@@ -365,21 +393,28 @@ class Instance:
                             column.description = output.description
                             column.output_assigned_column_description = output.description
 
+                    final_names.append(column.name)
+
                     if output.values is None:
                         if output.measure_type != column.measure_type:
                             column.clear()
                             column.change(measure_type=output.measure_type)
+                            changed.add(column.name)
                     elif len(output.values) == 0:
                         column.clear()
                         column.change(measure_type=output.measure_type)
+                        changed.add(column.name)
                     elif isinstance(output.values[0], int):
                         column.clear()
                         column.change(data_type=DataType.INTEGER, measure_type=output.measure_type)
                         if output.measure_type is not MeasureType.CONTINUOUS:
                             for level in output.levels:
                                 column.append_level(level.value, level.label)
+                        changed.add(column.name)
                     elif isinstance(output.values[0], float):
-                        column.change(data_type=DataType.DECIMAL, measure_type=MeasureType.CONTINUOUS)
+                        if column.data_type is not DataType.DECIMAL or column.measure_type is not MeasureType.CONTINUOUS:
+                            column.change(data_type=DataType.DECIMAL, measure_type=MeasureType.CONTINUOUS)
+                            changed.add(column.name)
                     else:
                         # shouldn't get here
                         continue
@@ -387,6 +422,10 @@ class Instance:
                     if output.values:
                         index = 0
                         n_values = len(output.values)
+                        if n_values > self._data.row_count:
+                            self._data.set_row_count(n_values)
+                            self._data.refresh_filter_state()
+                            rows_added_removed = True
                         for row_no in range(column.row_count):
                             if index < n_values:
                                 value = output.values[index]
@@ -398,6 +437,8 @@ class Instance:
                         if column.data_type == DataType.DECIMAL:
                             column.determine_dps()
 
+                        changed.add(column.name)
+
                     if response is None:
                         response = jcoms.DataSetRR()
 
@@ -405,9 +446,16 @@ class Instance:
                     self._populate_column_schema(column, column_pb, True)
                     column_pb.dataChanged = True
 
+                option_value = analysis.options.get_value(option_name)
+                if option_value is not None:
+                    option_value['vars'] = final_names
+                analysis.options.set_value(option_name, option_value)
+
                 # delete columns
 
                 for column in to_delete:
+                    changed.add(column.name)
+
                     if response is None:
                         response = jcoms.DataSetRR()
 
@@ -420,8 +468,15 @@ class Instance:
                 self._populate_schema_info(None, response)
                 self._coms.send(response, self._instance_id)
 
+            self._update_analyses(changed=changed, renamed=renamed, rows_added_removed=rows_added_removed)
+
         except Exception as e:
             log.exception(e)
+
+    def _on_weights_changed(self, event):
+        weights_column_name = event.data['weights']
+        self._data.set_weights_by_name(weights_column_name)
+        self._update_analyses(weights_changed=True)
 
     def _on_fs_request(self, request):
         try:
@@ -512,7 +567,7 @@ class Instance:
                     raise PermissionError()
 
                 if path == '{{Examples}}' or path == '{{Examples}}/':
-                    for module in Modules.instance():
+                    for module in self._session.modules:
                         if module.datasets:
                             if module.name == 'jmv':
                                 for dataset in module.datasets:
@@ -532,7 +587,7 @@ class Instance:
                                     entry.licenseUrl = module.datasets_license.url
                 else:
                     module_name = os.path.basename(path)
-                    modules = Modules.instance()
+                    modules = self._session.modules
                     try:
                         module = modules[module_name]
                         if module.datasets:
@@ -616,81 +671,154 @@ class Instance:
             cause = str(e)
             self._coms.send_error(message, cause, self._instance_id, request)
 
-    async def _on_save(self, request):
+    @property
+    def file_sync_client(self):
 
-        path = request.filePath
-        i9n = self._data.integration
+        class BlockLocalConnector(TCPConnector):
+            # block connections to the local network (security!)
+            async def _resolve_host(self, host: str, port: int, traces=None):
+                resolved_list = await super()._resolve_host(host, port, traces)
+                for resolved in resolved_list:
+                    if not ip_address(resolved['host']).is_global:
+                        raise PermissionError
+                return resolved_list
+
+        if self._file_sync_client is None:
+            self._file_sync_client = ClientSession(
+                raise_for_status=True,
+                connector=BlockLocalConnector(ssl=ssl_context()),
+            )
+
+        return self._file_sync_client
+
+
+    def save(self, options):
+        stream = ProgressStream()
+        create_task(self._save(options, stream))
+        return stream
+
+    async def _save(self, options, return_stream):
+
+        path = options['path']
+        trigger_download = False
 
         try:
-            if i9n and i9n.is_for(path):
 
-                async for progress in i9n.save(self._data, request.content):
-                    self._coms.send(None, self._instance_id, request,
-                                    complete=False, progress=progress)
-                status = i9n.gen_message()
+            if (self._data.file_sync is not None and
+                    self._data.file_sync.matches(path)):
+                file_sync = self._data.file_sync
+            elif is_url(path):
+                file_sync = create_file_sync(path, options, self.file_sync_client)
+            else:
+                file_sync = None
 
-                response = jcoms.SaveProgress()
-                response.success = True
-                response.path = self._data.path
-                response.title = self._data.title
-                response.saveFormat = self._data.save_format
-                self._coms.send(response, self._instance_id, request, status=status)
-
+            if file_sync:
+                with NamedTemporaryFile(suffix='.omv', delete=False) as file:
+                    path = file.name
+                file_exists = False
             else:
                 if path.startswith('{{Temp}}'):
-                    if self._perms.save.temp is False:
+                    if self._perms.save.download is False:
                         raise PermissionError()
+                    trigger_download = True
                 else:
                     if self._perms.save.local is False:
                         raise PermissionError()
 
                 path = self._normalise_path(path)
-
                 file_exists = os.path.isfile(path)
-                if file_exists is False or request.overwrite is True:
-                    if path.endswith('.omv'):
-                        await self._on_save_everything(request)
-                    elif request.incContent:
-                        await self._on_save_content(request)
-                    elif request.part != '':
-                        await self._on_save_part(request)
-                    else:
-                        await self._on_save_everything(request)
+
+            if file_exists and not options.get('overwrite', False):
+                raise FileExistsException
+
+            content = options.get('content')
+            part = options.get('part')
+
+            multiplier = 1000
+            if file_sync:
+                # if we're uploading, the save process represents
+                # only half of the total operation. (uploading is
+                # the second half)
+                multiplier = 500
+
+            if (not path.endswith('.omv')) and (content is not None) and (not file_sync):
+                stream = self._on_save_content(path, content)
+                is_export = True
+            elif part is not None:
+                stream = self._on_save_part(path, part)
+                is_export = True
+            else:
+                is_export = options.get('export', False)
+                stream = self._on_save_everything(path, content, is_export)
+
+            async for progress in stream:
+                return_stream.write((progress * multiplier, 1000))
+
+            if file_sync:
+                stat_info = os.stat(path)
+                file_size = stat_info.st_size
+
+                with open(path, 'rb') as file:
+                    overwrite = options.get('overwrite', False)
+                    stream = file_sync.write(file, file_size, overwrite)
+                    async for progress in stream:
+                        return_stream.write((multiplier + progress * multiplier, 1000))
+                    file_info: HttpSyncFileInfo = await stream
+
+                path = file_info.url
+                filename = file_info.filename
+            else:
+                path = self._virtualise_path(path)
+                filename = os.path.basename(path)
+
+            title, __ = os.path.splitext(filename)
+
+            result = { 'path': path, 'filename': filename, 'title': title }
+
+            if not is_export:
+                self._data.title = title
+                self._data.path = path
+                self._data.save_format = 'jamovi'
+                self._data.is_edited = False
+                self._data.file_sync = file_sync
+
+                self._add_to_recents(path, self._data.title)
+
+                result['saveFormat'] = self._data.save_format
+
+            if trigger_download:
+                result['download'] = True
+
+            return_stream.set_result(result)
+
+        except FileExistsException as e:
+            return_stream.set_exception(e)
+
+        except Exception as e:
+
+            log.exception(e)
+
+            base    = os.path.basename(path)
+            message = _('Unable to save {}').format(base)
+            cause = None
+
+            if isinstance(e, PermissionError):
+                cause = str(e)
+                if cause == '':
+                    cause = _('Access is denied. You may not have the appropriate permissions to access this resource.')
+            elif isinstance(e, OSError):
+                if e.strerror:
+                    cause = e.strerror
                 else:
-                    response = jcoms.SaveProgress()
-                    response.fileExists = True
-                    response.success = False
-                    self._coms.send(response, self._instance_id, request)
+                    cause = str(e)
+            else:
+                cause = str(e)
 
-        except PermissionError as e:
-            log.exception(e)
-            base    = os.path.basename(path)
-            message = _('Unable to save {}').format(base)
-            cause = str(e)
-            if cause == '':
-                cause = _('Access is denied. You may not have the appropriate permissions to access this resource.')
-            self._coms.send_error(message, cause, self._instance_id, request)
+            return_stream.set_exception(UserException(message, cause))
 
-        except OSError as e:
-            log.exception(e)
-            base    = os.path.basename(path)
-            message = _('Unable to save {}').format(base)
-            cause = e.strerror
-            self._coms.send_error(message, cause, self._instance_id, request)
+    async def _on_save_content(self, path, content):
 
-        except BaseException as e:
-            log.exception(e)
-            base    = os.path.basename(path)
-            message = _('Unable to save {}').format(base)
-            cause = str(e)
-            if not cause:
-                cause = type(e).__name__
-            self._coms.send_error(message, cause, self._instance_id, request)
-
-    async def _on_save_content(self, request):
-        path = request.filePath
-        path = self._normalise_path(path)
-        content = request.content
+        yield 0
 
         if path.endswith('.zip'):  # latex bundle export
 
@@ -711,60 +839,48 @@ class Instance:
             with open(path, 'wb') as file:
                 content = content.decode('utf-8')
                 async for progress in latexify(content, file, resolve_image):
-                    self._coms.send(None, self._instance_id, request,
-                                    complete=False, progress=progress)
+                    yield progress
 
         else:
             with open(path, 'wb') as file:
                 file.write(content)
 
-        path = self._virtualise_path(path)
+    async def _on_save_everything(self, path, content, is_export):
 
-        response = jcoms.SaveProgress()
-        response.path = path
-        response.success = True
-        self._coms.send(response, self._instance_id, request)
-
-    async def _on_save_everything(self, request):
-        path = request.filePath
-        path = self._normalise_path(path)
-        is_export = request.export
-        content = request.content
+        yield 0
 
         ioloop = asyncio.get_event_loop()
+        events = asyncio.Queue(1)
+
+        def add_to_event_queue(p):
+            if events.full():
+                events.get_nowait()  # discard
+            events.put_nowait(p)
 
         def prog_cb(p):
-            coms = self._coms
-            ioloop.call_soon_threadsafe(
-                functools.partial(
-                    coms.send, None, self._instance_id, request,
-                    complete=False, progress=(1000 * p, 1000)))
+            ioloop.call_soon_threadsafe(add_to_event_queue, p)
 
-        await ioloop.run_in_executor(None, formatio.write, self._data, path, prog_cb, content)
+        save_task = create_task(ioloop.run_in_executor(None, formatio.write, self._data, path, prog_cb, content))
+        retrieve_event_task = create_task(events.get())
+        pending = (retrieve_event_task, save_task)
 
-        if not is_export:
-            title = os.path.basename(path)
-            title, ext = os.path.splitext(title)
-            self._data.title = title
-            self._data.path = path
-            self._data.save_format = 'jamovi'
-            self._data.is_edited = False
-            self._data.integration = None
+        while True:
+            done, pending = await wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            if save_task in done:
+                break
+            yield retrieve_event_task.result()
+            retrieve_event_task = create_task(events.get())
+            pending = (retrieve_event_task, save_task)
 
-        response = jcoms.SaveProgress()
-        response.success = True
-        response.title = self._data.title
-        response.path = self._virtualise_path(path)
-        response.saveFormat = self._data.save_format
-        self._coms.send(response, self._instance_id, request)
+        for task in pending:
+            task.cancel()
 
-        if not is_export:
-            self._add_to_recents(path, self._data.title)
+        save_task.result()  # throw if necessary
 
-    async def _on_save_part(self, request):
-        path = request.filePath
-        path = self._normalise_path(path)
-        part = request.part
+
+    async def _on_save_part(self, path, part):
+
+        yield 0
 
         segments = part.split('/')
         analysisId = int(segments[0])
@@ -773,40 +889,43 @@ class Instance:
         analysis = self.analyses.get(analysisId)
 
         if analysis is not None:
-            try:
-                await analysis.save(path, address)
-            except Exception as e:
-                self._coms.send_error(_('Unable to save'), str(e), self._instance_id, request)
-            else:
-                path = self._virtualise_path(path)
-                response = jcoms.SaveProgress()
-                response.path = path
-                response.success = True
-                self._coms.send(response, self._instance_id, request)
+            await analysis.save(path, address)
         else:
-            self._coms.send_error(_('Error'), _('Unable to access analysis'), self._instance_id, request)
+            raise Exception(_('Unable to access analysis'))
 
-    def open(self, path, title=None, is_temp=False, ext=None):
+    def open(self, path, title=None, is_temp=False, ext=None, options=None):
+
+        if options is None:
+            options = { }
 
         is_example = path.startswith('{{Examples}}')
         if is_example:
             is_temp = True  # don't add to recents, etc.
 
-        if is_example and self._perms.open.examples is False:
-            raise PermissionError()
-        if is_url(path) and self._perms.open.remote is False:
-            raise PermissionError()
-        if path != '' and not is_example:
-            if self._perms.open.temp is False:
+        if path == '':
+            pass
+        elif is_example:
+            if self._perms.open.examples is False:
+                raise PermissionError()
+        elif is_url(path):
+            if self._perms.open.remote is False:
+                raise PermissionError()
+        else:
+            # either an upload or opening a local file
+            if self._perms.open.upload is False:
                 raise PermissionError()
             if self._perms.open.local is False:
                 temp_dir = conf.get('upload_path', None)
                 # prevent directory traversal attacks
+                if temp_dir is None:
+                    raise PermissionError()
                 path = os.path.join(temp_dir, path)
                 if temp_dir and os.path.commonpath([ temp_dir, path ]) == temp_dir:
                     pass
                 else:
                     raise PermissionError()
+
+        log.debug("opening '%s' '%s' %s", path, title, ext)
 
         stream = ProgressStream()
 
@@ -816,69 +935,38 @@ class Instance:
             nonlocal ext
 
             old_mm = None
-            temp_file = None
-            temp_file_path = None
+            # temp_file = None
+            # temp_file_path = None
+            file_sync: HttpSync | None = None
 
             try:
                 url = None
-                integ_handler = None
 
                 if is_url(path):
 
-                    url = parse.urlsplit(path)
-                    path = parse.unquote(url.path)
+                    url = path
+                    file_sync = create_file_sync(url, options, self.file_sync_client)
 
-                    url = list(url)
-                    url[2] = parse.quote(path)
-                    url = parse.urlunsplit(url)
+                    read_stream = file_sync.read()
+                    async for progress in read_stream:
+                        progress_to_50 = (500 * progress, 1000)
+                        stream.write(progress_to_50)
 
-                    filename = os.path.basename(path)
-                    path = url
+                    file_info = await read_stream
 
-                    integ_handler = get_special_handler(url)
+                    norm_path = file_info.url
+                    title, __ = os.path.splitext(file_info.filename)
+                    ext = file_info.ext
 
-                    async with ClientSession(raise_for_status=True) as session:
-                        async with session.get(url, ssl=ssl_context()) as response:
-
-                            if integ_handler is not None:
-                                await integ_handler.read(response)
-
-                            content_length = response.content_length
-
-                            if response.content_disposition and response.content_disposition.filename:
-                                filename = response.content_disposition.filename
-
-                            if not formatio.is_supported(filename):
-                                raise RuntimeError(_('Unrecognised file format'))
-
-                            title, dotext = os.path.splitext(filename)
-                            fd, temp_file_path = mkstemp(suffix=dotext)
-                            temp_file = os.fdopen(fd, 'wb')
-
-                            if dotext != '':
-                                ext = dotext[1:].lower()
-
-                            progress = [0, 1]
-                            if content_length:
-                                progress = [0, 2 * content_length]  # only goes up to 50%
-
-                            stream.write(progress)
-
-                            async for data in response.content.iter_any():
-                                temp_file.write(data)
-                                if content_length:
-                                    progress[0] += len(data)
-                                    stream.write(progress)
-
-                    temp_file.close()
-                    norm_path = temp_file_path
+                    if ext == 'omv' and not file_sync.read_only:
+                        is_temp = False
 
                 else:
                     norm_path = self._normalise_path(path)
 
                 old_mm = self._mm
-                self._mm = MemoryMap.create(self._buffer_path, 4 * 1024 * 1024)
-                dataset = DataSet.create(self._mm)
+                self._mm = StoreFactory.create(self._buffer_path, 'shmem')
+                dataset = self._mm.create_dataset()
                 self._data.dataset = dataset
 
                 ioloop = asyncio.get_event_loop()
@@ -888,17 +976,15 @@ class Instance:
                         progress = (500 + 500 * p, 1000)
                     else:
                         progress = (1000 * p, 1000)
-                    ioloop.call_soon_threadsafe(
-                        functools.partial(
-                            stream.write, progress))
+                    ioloop.call_soon_threadsafe(stream.write, progress)
 
                 main_settings = self._settings.group('main')
                 func = functools.partial(formatio.read, self._data, norm_path, prog_cb, main_settings, is_temp=is_temp, title=title, ext=ext)
                 result = await ioloop.run_in_executor(None, func)
 
-                if integ_handler is not None:
-                    self._data.integration = integ_handler
-                    await integ_handler.process(self._data)
+                if file_sync is not None:
+                    self._data.file_sync = file_sync
+                    self._data.path = url
 
                 stream.set_result(result)
 
@@ -948,13 +1034,13 @@ class Instance:
             finally:
                 if old_mm is not None:
                     old_mm.close()
-                if temp_file:
-                    if not temp_file.closed:
-                        temp_file.close()
-                    try:
-                        os.remove(temp_file_path)
-                    except Exception:
-                        pass
+                # if temp_file:
+                #     if not temp_file.closed:
+                #         temp_file.close()
+                #     try:
+                #         os.remove(temp_file_path)
+                #     except Exception:
+                #         pass
 
         create_task(read_file(path, is_temp, stream))
         return stream
@@ -963,151 +1049,6 @@ class Instance:
 
         if request.op == jcoms.OpenRequest.Op.Value('IMPORT_REPLACE'):
             await self._on_import(request)
-            return
-
-        path = request.filePath
-
-        old_mm = None
-        temp_file = None
-        temp_file_path = None
-
-        try:
-            url = None
-            title = None
-            was_downloaded = False
-            integ_handler = None
-
-            if is_url(path):
-
-                if self._perms.open.remote is False:
-                    raise PermissionError()
-
-                url = parse.urlsplit(path)
-                path = parse.unquote(url.path)
-
-                url = list(url)
-                url[2] = parse.quote(path)
-                url = parse.urlunsplit(url)
-
-                filename = os.path.basename(path)
-                path = url
-
-                integ_handler = get_special_handler(url)
-
-                async with ClientSession(raise_for_status=True) as session:
-                    async with session.get(url, ssl=ssl_context()) as response:
-
-                        if integ_handler is not None:
-                            await integ_handler.read(response)
-
-                        content_length = response.content_length
-
-                        if response.content_disposition and response.content_disposition.filename:
-                            filename = response.content_disposition.filename
-
-                        if not formatio.is_supported(filename):
-                            raise RuntimeError(_('Unrecognised file format'))
-
-                        title, ext = os.path.splitext(filename)
-                        fd, temp_file_path = mkstemp(suffix=ext)
-                        temp_file = os.fdopen(fd, 'wb')
-
-                        if content_length:
-                            progress = [ 0, 2 * content_length ]  # only goes up to 50%
-                        else:
-                            progress = [ 0, 1 ]
-                        self._coms.send(None, self._instance_id, request, complete=False, progress=progress)
-
-                        async for data in response.content.iter_any():
-                            temp_file.write(data)
-                            if content_length:
-                                progress[0] += len(data)
-                                self._coms.send(None, self._instance_id, request, complete=False, progress=progress)
-
-                temp_file.close()
-                norm_path = temp_file_path
-                virt_path = ''
-                is_example = False
-                was_downloaded = True
-
-            else:
-                norm_path = self._normalise_path(path)
-                virt_path = self._virtualise_path(path)
-                is_example = path.startswith('{{Examples}}')
-
-                if is_example and self._perms.open.examples is False:
-                    raise PermissionError()
-                if path != '' and not is_example and self._perms.open.local is False:
-                    raise PermissionError()
-
-            old_mm = self._mm
-            self._mm = MemoryMap.create(self._buffer_path, 4 * 1024 * 1024)
-            dataset = DataSet.create(self._mm)
-
-            self._data.dataset = dataset
-
-            ioloop = asyncio.get_event_loop()
-
-            def prog_cb(p):
-                coms = self._coms
-                if was_downloaded:
-                    progress = (500 + 500 * p, 1000)
-                else:
-                    progress = (1000 * p, 1000)
-                ioloop.call_soon_threadsafe(
-                    functools.partial(
-                        coms.send, None, self._instance_id, request,
-                        complete=False, progress=progress))
-
-            main_settings = self._settings.group('main')
-            func = functools.partial(formatio.read, self._data, norm_path, prog_cb, main_settings, is_temp=is_temp, title=title)
-            await ioloop.run_in_executor(None, func)
-
-            if integ_handler is not None:
-                self._data.integration = integ_handler
-                await integ_handler.process(self._data)
-
-            response = jcoms.OpenProgress()
-            response.path = virt_path
-
-            self._coms.send(response, self._instance_id, request)
-
-            if path != '' and not is_example:
-                self._add_to_recents(path, self._data.title)
-
-        except PermissionError as e:
-            log.exception(e)
-            base    = os.path.basename(path)
-            message = _('Unable to open {}').format(base)
-            cause = str(e)
-            if cause == '':
-                cause = _('Access is denied. You may not have the appropriate permissions to access this resource.')
-            self._coms.send_error(message, cause, self._instance_id, request)
-
-        except OSError as e:
-            log.exception(e)
-            base    = os.path.basename(path)
-            message = _('Unable to open {}').format(base)
-            cause = e.strerror
-            self._coms.send_error(message, cause, self._instance_id, request)
-
-        except Exception as e:
-            log.exception(e)
-            base    = os.path.basename(path)
-            message = _('Unable to open {}').format(base)
-            cause = str(e)
-            self._coms.send_error(message, cause, self._instance_id, request)
-
-        finally:
-            if old_mm is not None:
-                old_mm.close()
-            if temp_file:
-                if not temp_file.closed:
-                    temp_file.close()
-                try:
-                    os.remove(temp_file_path)
-                except Exception:
-                    pass
 
     async def _on_import(self, request):
 
@@ -1166,15 +1107,17 @@ class Instance:
                 path = self._paths[self._i]
 
                 norm_path = instance._normalise_path(path)
-                name = os.path.splitext(os.path.basename(path))[0]
+                name, __ = os.path.splitext(os.path.basename(path))
 
                 model = InstanceModel(instance)
 
                 if self._mm is not None:
                     self._mm.close()
 
-                self._mm = MemoryMap.create(self._buffer_path, 4 * 1024 * 1024)
-                model.dataset = DataSet.create(self._mm)
+                assert self._buffer_path is not None
+
+                self._mm = StoreFactory.create(self._buffer_path, 'shmem')
+                model.dataset = self._mm.create_dataset()
 
                 ioloop = asyncio.get_event_loop()
 
@@ -1240,11 +1183,12 @@ class Instance:
         self._coms.send(response, self._instance_id)
 
     def _main_settings_changed(self, event):
-        if 'theme' in event.data or 'palette' in event.data:
+        if 'theme' in event.data or 'palette' in event.data or 'decSymbol' in event.data:
             for analysis in self._data.analyses:
                 main_settings = self._settings.group('main')
                 analysis.options.set_value('theme', main_settings.get('theme', 'default'))
                 analysis.options.set_value('palette', main_settings.get('palette', 'default'))
+                analysis.options.set_value('decSymbol', main_settings.get('decSymbol', '.'))
                 if analysis.enabled:
                     analysis.run()
 
@@ -1406,6 +1350,8 @@ class Instance:
         has_dataset = self._data.has_dataset
         response.hasDataSet = has_dataset
 
+        response.resultsLanguage = self._data.results_language
+
         if has_dataset:
             response.title = self._data.title
             response.path = self._virtualise_path(self._data.path)
@@ -1444,6 +1390,10 @@ class Instance:
             if analysis.has_results:
                 analysis_pb = response.analyses.add()
                 analysis_pb.CopyFrom(analysis.results)
+                # ensure the following are set correctly
+                # analysis.results is read from a file, and can't be trusted
+                analysis_pb.enabled = analysis.enabled
+                analysis_pb.arbitraryCode = analysis.arbitrary_code
 
         self._coms.send(response, self._instance_id, request)
 
@@ -1465,32 +1415,39 @@ class Instance:
             return
 
         try:
-
             response = jcoms.DataSetRR()
 
             if request.op == jcoms.GetSet.Value('SET'):
-                response.op = request.op
-                self._clone_cell_selections(request, response)
-                if request.noUndo is False:
-                    self._mod_tracker.begin_event(request)
-                self._on_dataset_set(request, response)
-                if request.noUndo is False:
-                    self._mod_tracker.end_event()
+                with self._data.attach():
+                    response.op = request.op
+                    self._clone_cell_selections(request, response)
+                    if request.noUndo is False:
+                        self._mod_tracker.begin_event(request)
+                    self._on_dataset_set(request, response)
+                    if request.noUndo is False:
+                        self._mod_tracker.end_event()
             elif request.op == jcoms.GetSet.Value('GET'):
-                response.op = request.op
-                self._clone_cell_selections(request, response)
-                self._on_dataset_get(request, response)
+                with self._data.attach(read_only=True):
+                    response.op = request.op
+                    self._clone_cell_selections(request, response)
+                    self._on_dataset_get(request, response)
             elif request.op == jcoms.GetSet.Value('UNDO'):
-                undo_request = self._mod_tracker.begin_undo()
-                response.op = undo_request.op
-                self._clone_cell_selections(undo_request, response)
-                self._on_dataset_set(undo_request, response)
-                self._mod_tracker.end_undo(response)
+                with self._data.attach():
+                    log.debug('Undo')
+                    undo_request = self._mod_tracker.begin_undo()
+                    response.op = undo_request.op
+                    self._clone_cell_selections(undo_request, response)
+                    self._on_dataset_set(undo_request, response)
+                    self._mod_tracker.end_undo(response)
+                    log.debug('Undo complete')
             elif request.op == jcoms.GetSet.Value('REDO'):
-                redo_request = self._mod_tracker.get_redo()
-                response.op = redo_request.op
-                self._clone_cell_selections(redo_request, response)
-                self._on_dataset_set(redo_request, response)
+                with self._data.attach():
+                    log.debug('Redo')
+                    redo_request = self._mod_tracker.get_redo()
+                    response.op = redo_request.op
+                    self._clone_cell_selections(redo_request, response)
+                    self._on_dataset_set(redo_request, response)
+                    log.debug('Redo complete')
             else:
                 raise ValueError()
 
@@ -1509,7 +1466,7 @@ class Instance:
 
     async def _on_module(self, request):
 
-        modules = Modules.instance()
+        modules = self._session.modules
 
         try:
             if request.command == jcoms.ModuleRR.ModuleCommand.Value('INSTALL'):
@@ -1525,7 +1482,8 @@ class Instance:
                     self._session.notify_global_changes()
                 except Exception as e:
                     log.exception(e)
-                    self._coms.send_error(_('Unable to install module'), str(e), self._instance_id, request)
+                    if self._coms is not None:
+                        self._coms.send_error(_('Unable to install module'), str(e), self._instance_id, request)
 
             elif request.command == jcoms.ModuleRR.ModuleCommand.Value('UNINSTALL'):
                 if self._perms.library.addRemove is False:
@@ -1536,25 +1494,29 @@ class Instance:
                     self._session.notify_global_changes()
                 except Exception as e:
                     log.exception(e)
-                    self._coms.send_error(str(e), None, self._instance_id, request)
+                    if self._coms is not None:
+                        self._coms.send_error(str(e), None, self._instance_id, request)
             elif request.command == jcoms.ModuleRR.ModuleCommand.Value('SHOW'):
                 if self._perms.library.showHide is False:
                     raise PermissionError()
                 self._set_module_visibility(request.name, True)
-                self._coms.send(None, self._instance_id, request)
+                if self._coms is not None:
+                    self._coms.send(None, self._instance_id, request)
                 self._session.notify_global_changes()
             elif request.command == jcoms.ModuleRR.ModuleCommand.Value('HIDE'):
                 if self._perms.library.showHide is False:
                     raise PermissionError()
                 self._set_module_visibility(request.name, False)
-                self._coms.send(None, self._instance_id, request)
+                if self._coms is not None:
+                    self._coms.send(None, self._instance_id, request)
                 self._session.notify_global_changes()
 
         except PermissionError as e:
-            self._coms.send_error(_('Unable to perform request'), str(e), self._instance_id, request)
+            if self._coms is not None:
+                self._coms.send_error(_('Unable to perform request'), str(e), self._instance_id, request)
 
     def _set_module_visibility(self, name, value):
-        modules = Modules.instance()
+        modules = self._session.modules
         if modules.set_visibility(name, value):
             module_settings = self._settings.group('modules')
             hidden_mods = module_settings.get('hidden', [ ])
@@ -1569,7 +1531,7 @@ class Instance:
         if self._perms.library.browseable is False:
             self._coms.send_error(_('Unable to access library'), _('The library is disabled'), self._instance_id, request)
         else:
-            modules = Modules.instance()
+            modules = self._session.modules
             stream = modules.read_library()
 
             try:
@@ -1632,15 +1594,23 @@ class Instance:
             'deleted_transforms': set(),
             'filters_changed': False,
             'columns_renamed': { },
+            'rows_added_removed': False,
         }
 
-        self._on_dataset_del_cols(request, response, changes)
-        self._on_dataset_del_rows(request, response, changes)
-        self._on_dataset_ins_cols(request, response, changes)
-        self._on_dataset_ins_rows(request, response, changes)
-        self._on_dataset_mod_cols(request, response, changes)
-        if request.incData:
-            self._apply_cells(request, response, changes)
+        desc = describe_datasetrr(request)
+        log.debug('DataSet change: %s', desc)
+        log.debug('Request: %s', request.SerializeToString())
+
+        try:
+            self._on_dataset_del_cols(request, response, changes)
+            self._on_dataset_del_rows(request, response, changes)
+            self._on_dataset_ins_cols(request, response, changes)
+            self._on_dataset_ins_rows(request, response, changes)
+            self._on_dataset_mod_cols(request, response, changes)
+            if request.incData:
+                self._apply_cells(request, response, changes)
+        finally:
+            log.debug('DataSet changes complete')
 
         if changes['filters_changed']:
             response.filtersChanged = True
@@ -1674,6 +1644,19 @@ class Instance:
         changed |= set(map(lambda x: x.name, changes['deleted_columns']))
         changed |= set(map(lambda x: x.name, changes['data_changed']))
 
+        weights_changed = self._data.has_weights and self._data.weights_name in changed
+
+        self._update_analyses(changed=changed,
+                              renamed=renamed,
+                              rows_added_removed=changes['rows_added_removed'],
+                              filters_changed=changes['filters_changed'],
+                              weights_changed=weights_changed)
+
+    def _update_analyses(self, changed=set(), renamed=set(), rows_added_removed=False, filters_changed=False, weights_changed=False):
+
+        if rows_added_removed or filters_changed or weights_changed:
+            changed = set(map(lambda x: x.name, self._data))
+
         for analysis in self._data.analyses:
             using = analysis.get_using()
             using_and_changed = using & changed
@@ -1681,6 +1664,11 @@ class Instance:
                 analysis.notify_changes(using_and_changed, renamed)
             elif using_and_changed:
                 analysis.notify_changes(using_and_changed)
+            else:
+                # analysis uses no columns, but does create some
+                # so we should rerun it so it can recreate
+                if rows_added_removed and analysis.get_producing():
+                    analysis.notify_changes([])
 
     def _on_dataset_get(self, request, response):
         if request.incSchema:
@@ -1702,15 +1690,13 @@ class Instance:
                     _('You cannot insert rows while filtered rows are hidden'))
 
         insert_offsets = [0] * len(insertions)
-        for i in range(0, len(insertions)):
-            row_data = insertions[i]
+        for i, row_data in enumerate(insertions):
             self._data.insert_rows(row_data.rowStart + insert_offsets[i], row_data.rowCount)
-            for j in range(0, len(insertions)):
+            for j, _ in enumerate(insertions):
                 if j != i and (insertions[j].rowStart + insert_offsets[j]) >= (row_data.rowStart + insert_offsets[i]):
                     insert_offsets[j] += row_data.rowCount
 
-        for i in range(0, len(insertions)):
-            row_data = insertions[i]
+        for i, row_data in enumerate(insertions):
             row_data_pb = response.rows.add()
             row_data_pb.rowStart = row_data.rowStart + insert_offsets[i]
             row_data_pb.rowCount = row_data.rowCount
@@ -1718,6 +1704,7 @@ class Instance:
             self._mod_tracker.log_row_insertion(row_data_pb)
 
         if len(insertions) > 0:
+            changes['rows_added_removed'] = True
             # this is done so that the cell changes are sent back
             for column in self._data:
                 changes['columns'].add(column)
@@ -1858,6 +1845,7 @@ class Instance:
                 rows_removed = True
 
         if rows_removed:
+            changes['rows_added_removed'] = True
             for column in self._data:  # the column info needs sending back because the cell edit ranges have changed
                 changes['columns'].add(column)
                 changes['data_changed'].add(column)
@@ -1877,7 +1865,7 @@ class Instance:
 
         filter_deleted = False
 
-        for i in range(len(to_delete)):
+        for i, _ in enumerate(to_delete):
             column = None
             if request_schema_columns[i].id == 0:
                 column = self._data[request_schema_columns[i].index]
@@ -2378,7 +2366,7 @@ class Instance:
             changes['data_changed'].add(column)
 
     def _parse_cells(self, request):
-
+        main_settings = self._settings.group('main')
         if request.incData:
             block_count = len(request.data)
             blocks = [None] * block_count
@@ -2395,13 +2383,15 @@ class Instance:
                 if block_pb.incCBData:
                     cells = None
                     if block_pb.cbHtml != '':
-                        parser = HTMLParser()
+                        dec_symbol = main_settings.get('decSymbol', '.')
+                        parser = HTMLParser(dec_symbol=dec_symbol)
                         parser.feed(block_pb.cbHtml)
                         parser.close()
                         cells = parser.result()
                         size += self._mod_tracker.get_size_of(block_pb.cbHtml)
                     else:
-                        parser = CSVParser()
+                        dec_symbol = main_settings.get('decSymbol', '.')
+                        parser = CSVParser(dec_symbol=dec_symbol)
                         parser.feed(block_pb.cbText)
                         parser.close()
                         cells = parser.result()
@@ -2602,13 +2592,40 @@ class Instance:
                 values = block['values'][i]
 
                 if column.data_type == DataType.DECIMAL:
+
+                    # automagically convert euro floats
+                    euro_floats: bool = True
+
                     for value in values:
-                        if value is not None and value != '' and not isinstance(value, int) and not isinstance(value, float):
+                        if value is None or value == '':
+                            continue
+                        elif isinstance(value, float):
+                            euro_floats = False
+                            break
+                        elif isinstance(value, str):
+                            if not EURO_REGEX.match(value):
+                                euro_floats = False
+                                break
+
+                    for i, value in enumerate(values):
+                        if value is None or value == '':
+                            pass
+                        elif isinstance(value, int) or isinstance(value, float):
+                            pass
+                        elif euro_floats:
+                            # convert euro floats
+                            values[i] = float(value.replace(',', '.'))
+                        else:
                             raise TypeError(_("Cannot assign non-numeric value to column '{}'").format(column.name))
 
                 elif column.data_type == DataType.INTEGER:
                     for value in values:
-                        if isinstance(value, int) and not is_int32(value):
+                        if value is None or value == '':
+                            pass
+                        elif not isinstance(value, int):
+                            if column.measure_type == MeasureType.CONTINUOUS:
+                                raise TypeError(_("Cannot assign non-integer value to column '{}'").format(column.name))
+                        elif not is_int32(value):
                             raise TypeError(_("Value is too large for column '{}' of type integer").format(column.name))
 
             if col_count > 0 and data_col_count == 0:
@@ -2721,6 +2738,8 @@ class Instance:
                         column.set_value(row_no, value)
                     elif isinstance(value, str):
                         if column.measure_type == MeasureType.ID:
+                            raise RuntimeError('Should not get here')
+                        elif column.measure_type == MeasureType.CONTINUOUS:
                             raise RuntimeError('Should not get here')
                         elif column.has_level(value):
                             index = column.get_value_for_label(value)
@@ -2990,6 +3009,8 @@ class Instance:
                 level_pb.label = level[1]
                 level_pb.importValue = level[2]
                 level_pb.pinned = level[3]
+                level_pb.filtered = level[4]
+                level_pb.treatAsMissing = level[5]
 
         if column.cell_tracker.is_edited:
             for range in column.cell_tracker.edited_cell_ranges:
@@ -3056,10 +3077,6 @@ class Instance:
 
         response = jcoms.SettingsResponse()
 
-        setting_pb = response.settings.add()
-        setting_pb.name = 'updateStatus'
-        setting_pb.s = self._session.update_status
-
         for name in main_settings:
             value = main_settings.get(name)
             if isinstance(value, str):
@@ -3090,7 +3107,7 @@ class Instance:
 
         module_settings = self._settings.group('modules')
         hidden_mods = module_settings.get('hidden', [ ])
-        modules = Modules.instance()
+        modules = self._session.modules
         missing_mods = [ ]
         for hidden_mod in hidden_mods:
             if modules.set_visibility(hidden_mod, False) is False:
@@ -3110,6 +3127,22 @@ class Instance:
         conf_pb = response.config.add()
         conf_pb.name = 'mode'
         conf_pb.s = mode
+
+        conf_pb = response.config.add()
+        conf_pb.name = 'permissions_library_browseable'
+        conf_pb.b = self._perms.library.browseable
+
+        conf_pb = response.config.add()
+        conf_pb.name = 'permissions_library_add_remove'
+        conf_pb.b = self._perms.library.addRemove
+
+        conf_pb = response.config.add()
+        conf_pb.name = 'permissions_library_show_hide'
+        conf_pb.b = self._perms.library.showHide
+
+        conf_pb = response.config.add()
+        conf_pb.name = 'permissions_library_side_load'
+        conf_pb.b = self._perms.library.sideLoad
 
         self._coms.send(response, self._instance_id, request)
 
@@ -3135,7 +3168,9 @@ class Instance:
         module_pb.name = module.name
         module_pb.title = module.title
         module_pb.version = version
+        module_pb.buildTime = module.build_time
         module_pb.description = module.description
+        module_pb.category = module.category
         module_pb.authors.extend(module.authors)
         module_pb.path = module.path
         module_pb.isSystem = module.is_sys
@@ -3155,6 +3190,8 @@ class Instance:
             analysis_pb.menuSubgroup = analysis.menuSubgroup
             analysis_pb.menuTitle = analysis.menuTitle
             analysis_pb.menuSubtitle = analysis.menuSubtitle
+            analysis_pb.category = analysis.category
+
 
     def terminate(self, message, cause=''):
         if self._coms is not None:

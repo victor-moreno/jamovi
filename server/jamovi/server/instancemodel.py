@@ -1,4 +1,19 @@
 
+from __future__ import annotations
+
+from collections import deque
+import typing
+from typing import Callable
+from contextlib import contextmanager
+
+from jamovi.core import DataSet
+from jamovi.core import ColumnType
+from jamovi.core import DataType
+from jamovi.core import MeasureType
+
+from jamovi.server.dataset import ColumnRef
+from jamovi.server.dataset import CellValueArea
+
 from .transform import Transform
 from .rowtracker import RowTracker
 from .column import Column
@@ -6,26 +21,47 @@ from .analyses import Analyses
 from .utils import NullLog
 from .permissions import Permissions
 
-from jamovi.core import ColumnType
-from jamovi.core import DataType
-from jamovi.core import MeasureType
 from .i18n import _
 
-import collections
+if typing.TYPE_CHECKING:
+    from .instance import Instance
+    from .syncs import HttpSync
+
 
 
 class InstanceModel:
+
     N_VIRTUAL_COLS = 5
     N_VIRTUAL_ROWS = 50
+
+    _instance: Instance
+    _dataset: DataSet | None
+    _analyses: Analyses
+    _path: str
+    _save_format: str
+    _title: str
+    _reuseable_virtual_ids: deque
+    _filters_visible: bool
+    _results_language: str =  ''
+    _is_edited: bool = False
+    _is_blank: bool = False
+    _perms: Permissions
+    _columns: list
+    _transforms: list
+    _next_id: int
+    _transform_next_id: int
+    _log: object
+    _row_tracker: RowTracker
+    file_sync: HttpSync | None
 
     def __init__(self, instance):
         self._instance = instance
         self._dataset = None
-        self._analyses = Analyses(self)
+        self._analyses = Analyses(self, instance.session.modules)
         self._path = ''
         self._save_format = ''
         self._title = ''
-        self._reuseable_virtual_ids = collections.deque([])
+        self._reuseable_virtual_ids = deque([])
         self._filters_visible = True
 
         self._perms = Permissions.retrieve()
@@ -40,7 +76,37 @@ class InstanceModel:
         self._log = NullLog()
         self._row_tracker = RowTracker()
 
-        self.integration = None
+        self.file_sync = None
+
+    @contextmanager
+    def attach(self, read_only: bool=False):
+        ''' attach to the dataset for reading/writing'''
+        attach: Callable[[ bool ], None] | None
+        detach: Callable[[ ], None] | None
+
+        attach = getattr(self._dataset, 'attach', lambda _: None)
+        detach = getattr(self._dataset, 'detach', lambda: None)
+        assert attach
+        assert detach
+
+        attach(read_only)
+        try:
+            yield
+        finally:
+            detach()
+
+    @property
+    def results_language(self):
+        if self._results_language == '':
+            self._results_language = self._instance.session.get_language()
+            if self._results_language == None:
+                self._results_language = ''
+
+        return self._results_language
+
+    @results_language.setter
+    def results_language(self, language):
+        self._results_language = language
 
     @property
     def filters_visible(self):
@@ -80,13 +146,22 @@ class InstanceModel:
         return self.column_count > 0 and self[0].is_filter
 
     def get_index_ex_filtered(self, index):
+        assert self._dataset is not None
         if index >= self._dataset.row_count_ex_filtered:
             return self._dataset.row_count - self._dataset.row_count_ex_filtered + index
         else:
             return self._dataset.get_index_ex_filtered(index)
 
     def get_indices_ex_filtered(self, row_start, row_count):
+        assert self._dataset is not None
         return self._dataset.get_indices_ex_filtered(row_start, row_count)
+
+    def set_values(self, columns: ColumnRef, row_offset: int, values: CellValueArea):
+        self._dataset.set_values(columns, row_offset, values)
+
+    def get_values(self, columns: ColumnRef, row_offset: int, n_rows: int) -> CellValueArea:
+        assert self._dataset is not None
+        return self._dataset.get_values(columns, row_offset, n_rows)
 
     def __getitem__(self, index_or_name):
         if isinstance(index_or_name, int):
@@ -97,8 +172,7 @@ class InstanceModel:
             for column in self:
                 if column.name == name:
                     return column
-            else:
-                raise KeyError(name)
+            raise KeyError(name)
         else:
             raise ValueError
 
@@ -118,15 +192,19 @@ class InstanceModel:
         for column in self:
             if column.id == id:
                 return column
-        else:
-            raise KeyError('No such column: ' + str(id))
+        raise KeyError('No such column: ' + str(id))
+
+    def get_column_by_name(self, name):
+        for column in self:
+            if column.name == name:
+                return column
+        raise KeyError('No such column: ' + name)
 
     def get_transform_by_id(self, id):
         for transform in self.transforms:
             if transform.id == id:
                 return transform
-        else:
-            raise KeyError('No such transform: ' + str(id))
+        raise KeyError('No such transform: ' + str(id))
 
     def is_parent_of(self, parent, column, deep):
         if column.parent_id == parent.id:
@@ -235,6 +313,8 @@ class InstanceModel:
         return False
 
     def append_column(self, name, import_name=None, id=0):
+        if import_name is None:
+            import_name = name
         self._check_perms(column_count=self.column_count + 1)
         use_id = self._next_id
         if id != 0:
@@ -247,7 +327,6 @@ class InstanceModel:
             use_id = id
 
         column = self._dataset.append_column(name, import_name)
-        column.column_type = ColumnType.NONE
         column.id = use_id
 
         if use_id == self._next_id:
@@ -400,6 +479,8 @@ class InstanceModel:
         if name_column is None and add_name_column:
             name_column = self.insert_column(n_filters, 'source', 'source')
             name_column.column_type = ColumnType.DATA
+
+        if name_column is not None:
             name_column.change(
                 data_type=DataType.TEXT,
                 measure_type=MeasureType.NOMINAL)
@@ -544,11 +625,11 @@ class InstanceModel:
         return self._dataset is not None
 
     @property
-    def dataset(self):
+    def dataset(self) -> DataSet:
         return self._dataset
 
     @dataset.setter
-    def dataset(self, dataset):
+    def dataset(self, dataset: DataSet):
         self._dataset = dataset
 
     def setup(self):
@@ -711,20 +792,48 @@ class InstanceModel:
         return self._dataset.column_count
 
     @property
-    def is_edited(self):
-        return self._dataset.is_edited
+    def is_edited(self) -> bool:
+        return self._is_edited
 
     @is_edited.setter
-    def is_edited(self, edited):
-        self._dataset.is_edited = edited
+    def is_edited(self, edited: bool):
+        self._is_edited = edited
 
     @property
     def is_blank(self):
-        return self._dataset.is_blank
+        return self._is_blank
 
     @is_blank.setter
     def is_blank(self, blank):
-        self._dataset.blank = blank
+        self._is_blank = blank
+
+    @property
+    def has_weights(self):
+        return self.weights_name is not None
+
+    @property
+    def weights(self):
+        return self._dataset.weights
+
+    def set_weights(self, id: int):
+        self._dataset.set_weights(id)
+
+    @property
+    def weights_name(self):
+        weights_id = self.weights
+        if weights_id == 0:
+            return None
+        try:
+            return self.get_column_by_id(weights_id).name
+        except KeyError:
+            return None
+
+    def set_weights_by_name(self, name):
+        if name is None:
+            self._dataset.set_weights(0)
+        else:
+            column = self.get_column_by_name(name)
+            self._dataset.set_weights(column.id)
 
     def get_column_count_by_type(self, columnType):
         count = 0

@@ -1,54 +1,15 @@
 
 .silky-option-combo-input {
-    margin-left: 5px;
     max-width: 350px;
 }
 
-.silky-option-combo-label.silky-control-margin-small {
-    margin-left: 2px;
-}
-
-.silky-option-combo-input.silky-control-margin-small {
-    margin-right: 2px;
-}
-
-.silky-option-combo-input.silky-control-margin-small {
-    margin-top: 2px;
-    margin-bottom: 2px;
-}
-
-.silky-option-combo-label.silky-control-margin-normal {
-    margin-left: 5px;
-}
-
-.silky-option-combo-input.silky-control-margin-normal {
-    margin-right: 5px;
-}
-
-.silky-option-combo-input.silky-control-margin-normal {
-    margin-top: 5px;
-    margin-bottom: 5px;
-}
-
-.silky-option-combo-label.silky-control-margin-large {
-    margin-left: 10px;
-}
-
-.silky-option-combo-input.silky-control-margin-large {
-    margin-right: 10px;
-}
-
-.silky-option-combo-input.silky-control-margin-large {
-    margin-top: 10px;
-    margin-bottom: 10px;
-}
 
 .silky-layout-container > .first-cell > .silky-option-combo-label {
-    margin-left: 0px;
+    margin-inline-start: 0px;
 }
 
 .silky-layout-container > .last-cell > .silky-option-combo-input {
-    margin-right: 0px;
+    margin-inline-end: 0px;
 }
 
 .silky-option-combo-input, .silky-option-combo-input option {

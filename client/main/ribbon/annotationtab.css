@@ -39,25 +39,48 @@
     opacity: 0.4;
 }
 
+.jmv-ribbon-button[data-name=textalignright]:dir(rtl) {
+    order: 1;
+}
+
+.jmv-ribbon-button[data-name=textalignleft]:dir(rtl) {
+    order: 3;
+}
+
+.jmv-ribbon-button[data-name=textalignright] {
+    order: 3;
+}
+
+.jmv-ribbon-button[data-name=textaligncenter] {
+    order: 2;
+}
+
+.jmv-ribbon-button[data-name=textalignleft] {
+    order: 1;
+}
+
+.jmv-ribbon-button[data-name=textalignjustify] {
+    order: 4;
+}
 
 .jmv-ribbon-button[data-name=textcopy] > .jmv-ribbon-button-icon {
-    background-image: url('../assets/menu-data-copy.svg');
+    background-image: url('../../assets/menu-data-copy.svg');
 }
 
 .jmv-ribbon-button[data-name=textpaste] > .jmv-ribbon-button-icon {
-    background-image: url('../assets/menu-data-paste.svg');
+    background-image: url('../../assets/menu-data-paste.svg');
 }
 
 .jmv-ribbon-button[data-name=textundo] > .jmv-ribbon-button-icon {
-    background-image: url('../assets/menu-undo.svg');
+    background-image: url('../../assets/menu-undo.svg');
 }
 
 .jmv-ribbon-button[data-name=textredo] > .jmv-ribbon-button-icon {
-    background-image: url('../assets/menu-redo.svg');
+    background-image: url('../../assets/menu-redo.svg');
 }
 
 .jmv-ribbon-button[data-name=textcut] > .jmv-ribbon-button-icon {
-    background-image: url('../assets/menu-data-cut.svg');
+    background-image: url('../../assets/menu-data-cut.svg');
 }
 
 .jmv-ribbon-button[title='#000000'] {

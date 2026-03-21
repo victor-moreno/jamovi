@@ -21,30 +21,45 @@
 
 .jmv-toolbar-group-body .jmv-toolbar-button > .jmv-toolbar-button-menu {
     top: 100%;
-    left: 0px;
+    inset-inline-start: 0px;
     margin-top: 0px;
     border: 1px solid #d8d8d8;
     border-radius: 0px;
     background-color: #f8f8f8;
     position: absolute;
     box-shadow: 0px 0px 5px #c1c1c1;
+    z-index: 100;
 }
 
 .jmv-toolbar-group-body .jmv-toolbar-button.jmv-toolbar-button-size-medium > .jmv-toolbar-button-menu {
     top: 0px;
-    left: 100%;
+    inset-inline-start: 100%;
     margin-top: -1px;
-    margin-left: -1px;
+    margin-inline-start: -1px;
 }
 
 .jmv-toolbar-button .jmv-toolbar-button {
     font-size: 90%;
+    border: none;
+    background-color: transparent;
+}
+
+[keyboardfocus="true"] .jmv-toolbar-button:focus {
+    background-color: #d5dfeb !important;
+}
+
+[focusmode="default"] .jmv-toolbar-button:not([aria-disabled]):hover {
+    background-color: #d5dfeb;
+}
+
+[focusmode="hover"] .jmv-toolbar-button:not([aria-disabled]):hover {
+    background-color: #d5dfeb;
 }
 
 .jmv-toolbar-menu-arrow {
     width: 5.5px;
     height: 5.5px;
-    background-image: url('../assets/menu-button-arrow.svg');
+    background-image: url('../../assets/menu-button-arrow.svg');
     background-position: center;
     background-repeat: no-repeat ;
     background-size: contain;
@@ -83,12 +98,26 @@
     height: 25px;
 }
 
+.jmv-toolbar-button-menu {
+    position: absolute;
+    background-color: white;
+    padding: 1px 1px 4px;
+    background-color: white;
+    border: 1px solid rgb(193, 193, 193);
+    box-shadow: rgb(193, 193, 193) 0px 0px 5px;
+    box-sizing: border-box;
+    z-index: 200;
+}
+
 /*medium button*/
 .jmv-toolbar-group-body .jmv-toolbar-button.jmv-toolbar-button-size-medium {
     width: auto;
     flex-direction: row;
     align-items: center;
-    padding-left: 10px;
+    padding-inline-start: 10px;
+    background-color: inherit;
+    border: none;
+    font: inherit;
 }
 
 .jmv-toolbar-button-size-medium .jmv-toolbar-button-icon {
@@ -97,14 +126,17 @@
 }
 
 .jmv-toolbar-button-size-medium .jmv-toolbar-button-label {
-    margin-left: 3px;
-    margin-right: 15px;
+    margin-inline-start: 3px;
+    margin-inline-end: 15px;
     margin-top: 0px;
     white-space: nowrap;
 }
 
 .jmv-toolbar-button-size-medium .jmv-toolbar-menu-arrow {
-    margin: 0 2px 0 6px;
+    margin-top: 0px;
+    margin-bottom: 0px;
+    margin-inline-start: 6px;
+    margin-inline-end: 2px;
 }
 
 /*small button*/

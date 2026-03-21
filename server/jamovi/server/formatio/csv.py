@@ -10,13 +10,14 @@ import chardet
 import logging
 
 from .reader import Reader
+from .jsonlines import JSONLinesReader
 
 
 log = logging.getLogger('jamovi')
 
 
 def get_readers():
-    return [ ( 'csv', read ), ( 'tsv', read ), ( 'txt', read ) ]
+    return [ ( 'csv', read ), ( 'tsv', read ), ( 'txt', read ), ( 'json', read ) ]
 
 
 def get_writers():
@@ -25,7 +26,10 @@ def get_writers():
 
 def read(data, path, prog_cb, *, settings, **kwargs):
 
-    reader = CSVReader(settings)
+    if JSONLinesReader.is_this_json(path):
+        reader = JSONLinesReader(settings)
+    else:
+        reader = CSVReader(settings)
     reader.read_into(data, path, prog_cb)
 
 
@@ -92,8 +96,8 @@ class CSVReader(Reader):
             self._text_stream = TextIOWrapper(self._file, encoding=encoding, errors='replace')
 
             try:
-                some_data = self._text_stream.read(131072)
-                if len(some_data) == 131072:  # csv sniffer doesn't like partial lines
+                some_data = self._text_stream.read(16384)
+                if len(some_data) == 16384:  # csv sniffer doesn't like partial lines
                     some_data = trim_after_last_newline(some_data)
                 self._dialect = csv.Sniffer().sniff(some_data, ', \t;')
             except csv.Error as e:

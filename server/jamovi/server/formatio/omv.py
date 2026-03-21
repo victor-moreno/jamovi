@@ -17,11 +17,18 @@ from jamovi.core import ColumnType
 from jamovi.core import DataType
 from jamovi.core import MeasureType
 from jamovi.server.appinfo import app_info
+from jamovi.server.instancemodel import InstanceModel
 
 from ..i18n import _
 
 
-def write(data, path, prog_cb, html=None, is_template=False):
+from logging import getLogger
+
+
+log = getLogger(__name__)
+
+
+def write(data: InstanceModel, path, prog_cb, html=None, is_template=False):
 
     with ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zip:
 
@@ -33,10 +40,6 @@ def write(data, path, prog_cb, html=None, is_template=False):
 
         byts = bytes(content.getvalue(), 'utf-8')
 
-        # this causes problems with emails
-        zip.writestr('META-INF/MANIFEST.MF', byts, zipfile.ZIP_DEFLATED)
-
-        # so we'll move to this
         zip.writestr('meta', byts, zipfile.ZIP_DEFLATED)
 
         if html is not None:
@@ -115,22 +118,27 @@ def write(data, path, prog_cb, html=None, is_template=False):
 
         metadata = { }
 
-        metadataset = { }
-        metadataset['rowCount'] = row_count
-        metadataset['columnCount'] = data.column_count
-        metadataset['removedRows'] = data.row_tracker.removed_row_ranges
-        metadataset['addedRows'] = data.row_tracker.added_row_ranges
-        metadataset['fields'] = fields
-        metadataset['transforms'] = transforms
+        document = { }
+        document['resultsLanguage'] = data.results_language
+        metadata['document'] = document
+
+        meta_dataset = { }
+        meta_dataset['rowCount'] = row_count
+        meta_dataset['columnCount'] = data.column_count
+        meta_dataset['removedRows'] = data.row_tracker.removed_row_ranges
+        meta_dataset['addedRows'] = data.row_tracker.added_row_ranges
+        meta_dataset['fields'] = fields
+        meta_dataset['transforms'] = transforms
+        meta_dataset['weights'] = data.weights_name
 
         # if data.import_path is not '':
-        #     metadataset['importPath'] = data.import_path
+        #     meta_dataset['importPath'] = data.import_path
         # if data.embedded_path is not '':
-        #     metadataset['embeddedPath'] = data.embedded_path
+        #     meta_dataset['embeddedPath'] = data.embedded_path
         # if data.embedded_name is not '':
-        #     metadataset['embeddedName'] = data.embedded_name
+        #     meta_dataset['embeddedName'] = data.embedded_name
 
-        metadata['dataSet'] = metadataset
+        metadata['dataSet'] = meta_dataset
 
         zip.writestr('metadata.json', json.dumps(metadata), zipfile.ZIP_DEFLATED)
 
@@ -215,8 +223,11 @@ def write(data, path, prog_cb, html=None, is_template=False):
             resources += analysis.resources
 
         for rel_path in resources:
-            abs_path = os.path.join(data.instance_path, rel_path)
-            zip.write(abs_path, rel_path)
+            try:
+                abs_path = os.path.join(data.instance_path, rel_path)
+                zip.write(abs_path, rel_path)
+            except FileNotFoundError:
+                log.error(f"Unable to include resource '{ rel_path }'")
 
         # if data.embedded_path is not '':
         #     try:
@@ -302,11 +313,12 @@ def read(data, path, prog_cb, **kwargs):
             raise FileCorruptError(_('File is corrupt (manifest is corrupt)'))
 
         jav = (int(jav.group(1)), int(jav.group(2)))
-        if jav[0] > 11:
+        if jav[0] > 12:
             raise FileFormatNotSupportedError(_('A newer version of jamovi is required'))
 
         meta_content = zip.read('metadata.json').decode('utf-8')
         metadata = json.loads(meta_content)
+        meta_document = metadata.get('document', {'resultsLanguage': 'en'})
         meta_dataset = metadata['dataSet']
 
         # if 'importPath' in meta_dataset:
@@ -406,6 +418,9 @@ def read(data, path, prog_cb, **kwargs):
         data.row_tracker.added_row_ranges = meta_dataset.get('addedRows', [])
 
         data.set_row_count(row_count)
+        data.set_weights_by_name(meta_dataset.get('weights'))
+
+        data.results_language = meta_document.get('resultsLanguage', 'en')
 
         columns_w_bad_levels = [ ]  # do some repair work
 
@@ -422,10 +437,16 @@ def read(data, path, prog_cb, **kwargs):
                                 import_value = meta_label[1]
                                 if len(meta_label) > 2:
                                     import_value = meta_label[2]
+
+                                # under some circumstances, jamovi wrote empty strings for import values
+                                # this breaks all sorts of things, so we fix it here (#1573)
+                                if import_value == '':
+                                    import_value = meta_label[1]
+
                                 if len(meta_label) > 3:
                                     pinned = meta_label[3]
                                 else:
-                                    pinned = column.trim_levels == False
+                                    pinned = column.trim_levels is False
                                 column.append_level(meta_label[0], meta_label[1],  import_value, pinned)
                         else:
                             columns_w_bad_levels.append(column.id)

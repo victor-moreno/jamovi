@@ -27,6 +27,8 @@ cdef extern from "column.h":
         const char *svalue() const;
         const char *label() const;
         bool pinned() const;
+        bool treatAsMissing() const;
+        bool filtered() const;
     ctypedef union Value:
         char *s
         float d
@@ -68,6 +70,9 @@ cdef extern from "datasetw.h":
         CColumn operator[](int index) except +
         CColumn operator[](const char *name) except +
         CColumn getColumnById(int id) except +
+        bool hasWeights();
+        int weights() except +
+        void setWeights(int id);
         void setEdited(bool edited);
         bool isEdited() const;
         void setBlank(bool blank);
@@ -99,6 +104,32 @@ cdef class DataSet:
         ds = DataSet()
         ds._this = CDataSet.retrieve(memoryMap._this)
         return ds
+
+    def attach(self, read_only=False):
+        pass
+
+    def detach(self):
+        pass
+
+    def set_values(self, columns, row_offset, values):
+        if (isinstance(columns, int) or
+                isinstance(columns, str)):
+            columns = [columns]
+
+        for index, index_or_name in enumerate(columns):
+            column_values = values[index]
+            self[index_or_name].set_values(row_offset, column_values)
+
+    def get_values(self, columns, row_offset, n_rows):
+        if (isinstance(columns, int) or
+                isinstance(columns, str)):
+            columns = [columns]
+
+        values = [None] * len(columns)
+        for index, index_or_name in enumerate(columns):
+            values[index] = self[index_or_name].get_values(row_offset, n_rows)
+
+        return values
 
     def __getitem__(self, index_or_name):
         cdef int index
@@ -157,6 +188,13 @@ cdef class DataSet:
     def column_count(self):
         return self._this.columnCount()
 
+    @property
+    def weights(self) -> int:
+        return self._this.weights()
+
+    def set_weights(self, id: int):
+        self._this.setWeights(id)
+
     def get_index_ex_filtered(self, index):
         if index < self.row_count_ex_filtered:
             return self._this.getIndexExFiltered(index)
@@ -167,20 +205,6 @@ cdef class DataSet:
         offsets = map(self.get_index_ex_filtered, range(row_start, row_start + row_count))
         offsets = list(offsets)
         return offsets
-
-    property is_edited:
-        def __get__(self):
-            return self._this.isEdited()
-
-        def __set__(self, edited):
-            self._this.setEdited(edited)
-
-    property is_blank:
-        def __get__(self):
-            return self._this.isBlank()
-
-        def __set__(self, blank):
-            self._this.setBlank(blank)
 
     def refresh_filter_state(self):
         self._this.refreshFilterState()
@@ -281,7 +305,6 @@ cdef class Column:
         def __set__(self, name):
             if not isinstance(name, str):
                 raise TypeError('name must be instance of str')
-            name = name[:63]
             self._this.setName(name.encode('utf-8'))
 
     property import_name:
@@ -291,7 +314,6 @@ cdef class Column:
         def __set__(self, name):
             if not isinstance(name, str):
                 raise TypeError('name must be instance of str')
-            name = name[:63]
             self._this.setImportName(name.encode('utf-8'))
 
     property description:
@@ -301,7 +323,6 @@ cdef class Column:
         def __set__(self, desc):
             if not isinstance(desc, str):
                 raise TypeError('desc must be instance of str')
-            desc = desc[:1024]
             self._this.setDescription(desc.encode('utf-8'))
 
     property column_type:
@@ -413,15 +434,15 @@ cdef class Column:
         else:
             self._this.append[int](value)
 
-    def append_level(self, raw, label, importValue=None, pinned=False):
-        if importValue is None:
-            importValue = label
-        self._this.appendLevel(raw, label.encode('utf-8'), importValue.encode('utf-8'), pinned)
+    def append_level(self, raw, label, import_value=None, pinned=False):
+        if import_value is None:
+            import_value = label
+        self._this.appendLevel(raw, label.encode('utf-8'), import_value.encode('utf-8'), pinned)
 
-    def insert_level(self, raw, label, importValue=None, pinned=False):
-        if importValue is None:
-            importValue = label
-        self._this.insertLevel(raw, label.encode('utf-8'), importValue.encode('utf-8'), pinned)
+    def insert_level(self, raw, label, import_value=None, pinned=False):
+        if import_value is None:
+            import_value = label
+        self._this.insertLevel(raw, label.encode('utf-8'), import_value.encode('utf-8'), pinned)
 
     def get_label(self, value):
         cdef int v
@@ -469,7 +490,9 @@ cdef class Column:
                         count,
                         level.label().decode('utf-8'),
                         level.svalue().decode('utf-8'),
-                        level.pinned()))
+                        level.pinned(),
+                        level.filtered(),
+                        level.treatAsMissing()))
                     count += 1
             else:
                 for level in levels:
@@ -477,7 +500,9 @@ cdef class Column:
                         level.ivalue(),
                         level.label().decode('utf-8'),
                         level.svalue().decode('utf-8'),
-                        level.pinned()))
+                        level.pinned(),
+                        level.filtered(),
+                        level.treatAsMissing()))
         return arr
 
     @property
@@ -551,10 +576,20 @@ cdef class Column:
                 else:
                     level_i = self.level_count
                     level_v = value.encode('utf-8')
-                    self._this.appendLevel(level_i, level_v, ''.encode('utf-8'), False)
+                    self._this.appendLevel(level_i, level_v, level_v, False)
                 self._this.setIValue(index, level_i, initing)
         else:
             self._this.setIValue(index, value, initing)
+
+    def set_values(self, index, values, initing=False):
+        for i, value in enumerate(values):
+            self.set_value(index + i, value, initing=initing)
+
+    def get_values(self, index, n):
+        values = [None] * n
+        for i in range(n):
+            values[i] = self.get_value(index + i)
+        return values
 
     def get_value(self, index):
         cdef int raw
@@ -617,7 +652,7 @@ cdef class Column:
 
         self._this.setLevels(new_levels)
 
-    def parse_missing_value(self, missing_value):
+    def _parse_missing_value(self, missing_value):
         optr = 0
         new_value = missing_value.strip()
         if new_value.startswith('=='):
@@ -681,11 +716,17 @@ cdef class Column:
         cdef int ivalue
         cdef CMissingValue m_value
 
-        for missing_value in missing_values:
-            pmv = self.parse_missing_value(missing_value)
+        # we have to keep all the missing values bytes in play
+        # i.e. we can't let them get replaced on the stack
+        # so we keep them in a list, rather than just assigning to a
+        # temp variable ... kinda surprising this is necessary
+        utf8_bytes = [None] * len(missing_values)
+
+        for index, missing_value in enumerate(missing_values):
+            pmv = self._parse_missing_value(missing_value)
             if pmv['type'] is 0:
-                utf8_bytes = pmv['value'].encode('utf-8')
-                m_value.value.s = utf8_bytes
+                utf8_bytes[index] = pmv['value'].encode('utf-8')
+                m_value.value.s = utf8_bytes[index]
             elif pmv['type'] is 1:
                 m_value.value.d = pmv['value']
             elif pmv['type'] is 2:
@@ -726,7 +767,7 @@ cdef class Column:
             self.set_levels(levels)
 
     def should_treat_as_missing(self, index):
-        return self._this.shouldTreatAsMissing(index);
+        return self._this.shouldTreatAsMissing(index)
 
 cdef extern from "dirs.h":
     cdef cppclass CDirs "Dirs":

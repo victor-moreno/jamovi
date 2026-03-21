@@ -1,6 +1,4 @@
 
-const events = require('events');
-
 const APP_NAME = 'jamovi';
 
 
@@ -11,11 +9,13 @@ function on(name, callback) {
     listeners.push({ name, callback });
 }
 
-function _notify(name, event) {
-    for (let listener of listeners) {
-        let ret = listener.callback(event);
-        if (ret === false)
-            return ret;
+async function _notify(name, event) {
+    for (const listener of listeners) {
+        if (listener.name === name) {
+            const ret = await Promise.resolve(listener.callback(event));
+            if (ret === false)
+                return ret;
+        }
     }
 }
 
@@ -30,63 +30,25 @@ else
     os = 'other';
 
 const electron = require('electron');
-const remote = electron.remote;
-const webFrame = electron.webFrame;
-const browserWindow = remote.getCurrentWindow();
-const webContents = browserWindow.webContents;
-const dialog = remote.dialog;
-const Menu = remote.Menu;
-const clipboard = electron.clipboard;
-const nativeImage = electron.nativeImage;
 const shell = electron.shell;
 const contextBridge = electron.contextBridge;
 
-const version = Promise.resolve(remote.getGlobal('version'));
-const nameAndVersion = Promise.resolve(APP_NAME + ' ' + remote.getGlobal('version'));
-const baseUrl = 'http://127.0.0.1:' + remote.getGlobal('mainPort') + '/';
-const analysisUIUrl  = 'http://127.0.0.1:' + remote.getGlobal('analysisUIPort') + '/';
-const resultsViewUrl = 'http://127.0.0.1:' + remote.getGlobal('resultsViewPort') + '/';
-
 const ipc = electron.ipcRenderer;
 
-// intercept page refreshes, so we can differentiate between
-// a page refresh, and a window close
+const version = new Promise(async (resolve) => {
+    let config = await ipc.invoke('get-config');
+    resolve(config.version);
+});
 
-let beforeInputEvent = (event, input) => {
-    if (input.type !== 'keyDown')
-        return;
-    if ((input.key === 'r' && input.meta) ||
-        (input.key === 'F5') ||
-        (input.key === 'r' && input.ctrlKey)) {
-        loading = true;
-        location.reload();
-    }
-};
+const nameAndVersion = version.then((version) => {
+    return `${ APP_NAME } ${ version }`;
+});
 
-webContents.on('before-input-event', beforeInputEvent);
-
-let loading = false;
-let closing = false;
-
-// beforeunload is how we intercept window closes (prompt to save)
-// but it also gets triggered for page refreshes. in general, the user
-// shouldn't be able to refresh the page, but they're useful during
-// development.
-
-window.onbeforeunload = (event) => {
-    if (closing !== true && loading !== true) {
-        setTimeout(() => {
-            let event = { };
-            let returned = _notify('close', event);
-            if (returned !== false) {
-                closing = true;
-                closeWindow();
-            }
-        });
-        return false;
-    }
-    webContents.removeListener('before-input-event', beforeInputEvent);
-};
+ipc.on('notify', async (event, data) => {
+    const { type, args } = data;
+    const value = await _notify(type, args);
+    ipc.send('notify-return', { type, value });
+});
 
 function minimizeWindow() {
     ipc.send('request', { type: 'minimize' });
@@ -103,10 +65,6 @@ function closeWindow(force) {
 }
 
 function navigate(instanceId) {
-    // loading = true;
-    // window.location = `${ window.location.origin }/${ instanceId }/`;
-
-    // work around for: https://github.com/electron/electron/issues/20746
     ipc.send('request', { type: 'navigate', data: instanceId });
 }
 
@@ -115,17 +73,11 @@ function openWindow(instanceId) {
 }
 
 function toggleDevTools() {
-    ipc.send('request', { type: 'openDevTools' });
-}
-
-function openRecorder() {
-    // we send the parent so it can be the first window for recording
-    ipc.send('request', { type: 'openRecorder', data: browserWindow.id });
+    ipc.send('request', { type: 'toggleDevTools' });
 }
 
 function openUrl(url) {
-    if (url.startsWith('http://') || url.startsWith('https://'))
-        shell.openExternal(url);
+    ipc.send('request', { type: 'openUrl', data: { url } });
 }
 
 const zoomLevels = [ 30, 50, 67, 80, 90, 100, 110, 120, 133, 150, 170, 200, 240, 300 ];
@@ -134,7 +86,7 @@ let zoomLevel = 5;
 function zoomIn() {
     if (zoomLevel < zoomLevels.length - 1) {
         zoomLevel++;
-        let z = zoomLevels[zoomLevel];
+        const z = zoomLevels[zoomLevel];
         zoom(z);
     }
 }
@@ -142,7 +94,7 @@ function zoomIn() {
 function zoomOut() {
     if (zoomLevel > 0) {
         zoomLevel--;
-        let z = zoomLevels[zoomLevel];
+        const z = zoomLevels[zoomLevel];
         zoom(z);
     }
 }
@@ -153,24 +105,15 @@ function zoom(z) {
         zoomLevel = 5;
         z = 100;
     }
-    if (webFrame.setLayoutZoomLevelLimits) {
-        // this was working around a bug in earlier electrons
-        webFrame.setLayoutZoomLevelLimits(-999999, 999999);
-        webFrame.setZoomFactor(z / 100);
-        let ezl = webFrame.getZoomLevel();
-        webFrame.setLayoutZoomLevelLimits(ezl, ezl);
-    }
-    else {
-        webFrame.setZoomFactor(z / 100);
-    }
+    ipc.send('request', { type: 'zoom', data: { zoom: z / 100 } });
 }
 
 function currentZoom() {
-    return parseInt(100 * webFrame.getZoomFactor());
+    return zoomLevels[zoomLevel];
 }
 
-function showMessageBox(options) {
-    return (dialog.showMessageBoxSync || dialog.showMessageBox)(browserWindow, options);
+async function showMessageBox(options) {
+    return await ipc.invoke('show-message-box', options);
 }
 
 window.onkeydown = function(event) {
@@ -197,27 +140,27 @@ window.onkeydown = function(event) {
 }
 
 function setEdited(edited) {
-    browserWindow.setDocumentEdited(edited);
+    ipc.send('request', { type: 'setEdited', data: { edited } });
 }
 
 function constructMenu(template) {
-    const menu = Menu.buildFromTemplate(template);
-    Menu.setApplicationMenu(menu);
+    ipc.send('request', { type: 'setMenu', data: { template } });
 }
 
-function copyToClipboard(data) {
-    if ('image' in data)
-        data.image = nativeImage.createFromDataURL(data.image);
-    clipboard.write(data);
-    return Promise.resolve();
+async function copyToClipboard(content) {
+    await ipc.invoke('copy-to-clipboard', { content });
 }
 
-function pasteFromClipboard() {
-    let text = clipboard.readText();
-    let html = clipboard.readHTML();
-    if (html === text)
-        html = '';
-    return { text, html };
+async function pasteFromClipboard() {
+    const { text, html } = await ipc.invoke('paste-from-clipboard');
+    return {
+        text,
+        html: html === text ? '' : html
+    };
+}
+
+async function setLanguage(code) {
+    await ipc.invoke('set-language', code);
 }
 
 function setDialogProvider(provider) {
@@ -225,56 +168,50 @@ function setDialogProvider(provider) {
 }
 
 async function showSaveDialog(options) {
-    let result = await dialogProvider.showDialog('export', options);
-    if (result.cancelled)
-        return result;
-    // On linux we don't get an extension, so here we add the default one
-    // https://github.com/electron/electron/issues/21935
-    let hasExtension = /\.[^\/\\]+$/.test(result.file);
-    if (hasExtension === false && options.filters) {
-        let defaultExt = options.filters[0].extensions[0];
-        result.file = `${ result.file }.${ defaultExt }`;
-    }
-    return result;
+    return await dialogProvider.showDialog('export', options);
 }
 
 async function showSaveDialogExternal(options) {
     options = options || { };
-    let result = await dialog.showSaveDialog(options);
+    let result = await ipc.invoke('show-save-dialog', options);
     if (result.canceled) {
         return { cancelled: true };
     }
     else {
         let file = result.filePath.replace(/\\/g, '/');
+        // On linux we don't get an extension, so here we add the default one
+        // https://github.com/electron/electron/issues/21935
+        let hasExtension = /\.[^\/\\]+$/.test(file);
+        if (hasExtension === false && options.filters) {
+            let defaultExt = options.filters[0].extensions[0];
+            file = `${ file }.${ defaultExt }`;
+        }
         return { cancelled: false, file };
     }
 }
 
 async function showOpenDialog(options) {
-    options = options || { };
+
     options.properties = options.properties || [ 'openFile' ];
     if (options.multiple)
         options.properties.push('multiSelections');
 
-    let result = await dialog.showOpenDialog(options);
+    let result = await ipc.invoke('show-open-dialog', options);
     if (result.canceled) {
         return { cancelled: true };
     }
     else {
-        let files = result.filePaths.map(x => x.replace(/\\/g, '/'));
-        return { cancelled: false, files };
+        const paths = result.filePaths.map(x => x.replace(/\\/g, '/'));
+        return { cancelled: false, paths };
     }
 }
 
 contextBridge.exposeInMainWorld(
-    'host',
+    'electronAPI',
     {
         isElectron: true,
         version,
         nameAndVersion,
-        baseUrl,
-        analysisUIUrl,
-        resultsViewUrl,
         minimizeWindow,
         maximizeWindow,
         closeWindow,
@@ -290,12 +227,12 @@ contextBridge.exposeInMainWorld(
         navigate,
         constructMenu,
         copyToClipboard,
+        setLanguage,
         pasteFromClipboard,
         showSaveDialog,
         showSaveDialogExternal,
         showOpenDialog,
         os,
         openUrl,
-        openRecorder,
         setDialogProvider
     });

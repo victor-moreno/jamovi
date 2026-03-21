@@ -12,36 +12,38 @@
 
 .jmv-ribbon-button-menu {
     top: 100%;
-    margin-left: -3px;
+    margin-inline-start: -3px;
     margin-top: 0px;
     border-radius: 0px;
     background-color: white;
-
     position: absolute;
     white-space: nowrap;
-    text-align: left ;
+    text-align: start;
     z-index: 100;
-    color: #555555 ;
+    color: #555555;
     max-width: 330px;
     min-width: 100px;
-    padding: 1px ;
-
+    padding: 1px 1px 4px 1px;
     border: 1px solid #c1c1c1;
     box-shadow: 0px 0px 5px #c1c1c1;
 }
 
 .jmv-ribbon-menu-arrow {
-    width: 5.5px;
-    height: 5.5px;
-    background-image: url('../assets/menu-button-arrow.svg');
+    width: 8px;
+    height: 8px;
+    transform: rotate(270deg);
+    background-image: url('../../assets/modules-analyses-arrow.svg');
     background-position: center;
     background-repeat: no-repeat ;
     background-size: contain;
-    margin: 0 2px 0 6px;
+    margin-top: 0px;
+    margin-inline-end: 2px;
+    margin-bottom: 0px;
+    margin-inline-start: 6px;
 }
 
 .jmv-ribbon-button-size-small .jmv-ribbon-menu-arrow {
-    height: 100%;
+    /*height: 100%;*/
     margin: 0 0px 0 0px;
 }
 
@@ -51,11 +53,11 @@
 }
 
 .jmv-ribbon-group-body .jmv-ribbon-button-label {
-    margin-top: 3px;
+    margin-top: 5px;
     flex-grow: 1;
-    text-align: left;
-    margin-left: 3px;
-    margin-right: 3px;
+    text-align: start;
+    margin-inline-start: 3px;
+    margin-inline-end: 3px;
 }
 
 /*huge button*/
@@ -84,6 +86,8 @@
     width: auto;
     flex-direction: row;
     align-items: center;
+    height: 24px;
+    line-height: 24px;
 }
 
 .jmv-ribbon-group-body .jmv-ribbon-button.jmv-ribbon-button-size-small.has-children {
@@ -94,19 +98,25 @@
 }
 
 .jmv-ribbon-button-size-medium .jmv-ribbon-button-icon {
-    height: 15px;
+    height: 16px;
     width: 20px;
 }
 
+[keyboardfocus="true"] .jmv-ribbon-button:focus {
+    background-color: #d5dfeb;
+}
+
+
 .jmv-ribbon-button-size-medium .jmv-ribbon-button-label {
-    margin-left: 4px;
+    margin-inline-start: 8px;
     margin-top: 0px;
-    margin-right: 0px;
+    margin-inline-end: 13px;
 }
 
 /*small button*/
 .jmv-ribbon-group-body .jmv-ribbon-button.jmv-ribbon-button-size-small:not(.has-children) {
-    width: 18px ;
+    width: 24px ;
+    height: 24px;
     padding: 3px;
 }
 

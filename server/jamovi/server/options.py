@@ -1,4 +1,6 @@
 
+from typing import Any
+
 from .jamovi_pb2 import AnalysisOption
 from .jamovi_pb2 import AnalysisOptions
 
@@ -45,7 +47,7 @@ def write_value_to_pb(value, pb):
         pb.o = NONE
 
 
-def read_value_from_pb(pb):
+def read_value_from_pb(pb: AnalysisOption):
     if pb.HasField('s'):
         return pb.s
     elif pb.HasField('c'):
@@ -67,6 +69,15 @@ def read_value_from_pb(pb):
         return pb.d
     else:
         return None
+
+
+def read_values_from_pb(pb: AnalysisOptions) -> dict[str, Any]:
+    values = {}
+    for i, opt_pb in enumerate(pb.options):
+        name = pb.names[i]
+        value = read_value_from_pb(opt_pb)
+        values[name] = value
+    return values
 
 
 class Option:
@@ -95,8 +106,12 @@ class Option:
 
     def gen_default(self):
         if 'default' in self.defn:
-            return self.defn['default']
-        elif self.type == 'Bool':
+            def4ult = self.defn['default']
+            if self.type == 'Output':
+                return { 'value': def4ult, 'vars': [ ], 'synced': [ ] }
+            else:
+                return def4ult
+        elif self.type == 'Bool' or self.type == 'Action':
             return False
         elif self.type == 'Variables':
             return [ ]
@@ -332,7 +347,10 @@ class Options:
 
             if changed:
                 if name.startswith('results/'):
-                    pass
+                    # 'results/' options don't change the analysis, except these ones
+                    if (name.endswith('/widthScale')
+                            or name.endswith('/heightScale')):
+                        changes = True
                 elif name not in self._options or not self._options[name].passive:
                     changes = True
 
@@ -345,6 +363,15 @@ class Options:
                 del self._pb.names[i]
 
         return changes
+
+    def get_producing(self):
+        producing = set()
+        for option in self._options.values():
+            if option.type == 'Output':
+                value = option.get_value()
+                if value is not None and 'vars' in value:
+                    producing.update(value['vars'])
+        return producing
 
     def get_using(self):
         using = set()
@@ -367,6 +394,13 @@ class Options:
             pb = self._pb.options[i]
             option.attach(pb)
             option.rename_using(changes)
+
+    def clear_actions(self):
+        for i, name in enumerate(self._pb.names):
+            option = self._options.get(name, None)
+            if option is not None and option.type == 'Action':
+                opt_pb = self._pb.options[i]
+                write_value_to_pb(False, opt_pb)
 
     def read(self, bin):
         self._pb.ParseFromString(bin)

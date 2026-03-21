@@ -1,17 +1,6 @@
-.silky-option-list.silky-control-margin-small {
-    margin: 2px;
-}
-
-.silky-option-list.silky-control-margin-normal {
-    margin: 5px;
-}
-
-.silky-option-list.silky-control-margin-large {
-    margin: 10px;
-}
 
 .silky-layout-container > .first-cell > .silky-option-list {
-    margin-left: 0px;
+    margin-inline-start: 0px;
 }
 
 .silky-layout-container:not(.silky-control-body) > .first-row > .silky-option-list {
@@ -19,7 +8,7 @@
 }
 
 .silky-layout-container > .last-cell > .silky-option-list {
-    margin-right: 0px;
+    margin-inline-end: 0px;
 }
 
 .silky-layout-container:not(.silky-control-body) > .last-row > .silky-option-list {
@@ -33,6 +22,12 @@
 .column-ghost-label {
     color: #cccccc;
     margin: 5px;
+}
+
+.disabled-list {
+    -webkit-filter: grayscale(100%) opacity(50%);
+    filter: grayscale(100%) opacity(50%);
+    pointer-events: none;
 }
 
 .hidden-ghost-label {
@@ -61,15 +56,16 @@
     box-sizing: border-box ;
     text-align: center ;
     cursor: default ;
-    margin-right: 6px ;
-    margin-left: 6px ;
+    margin-inline-end: 6px ;
+    margin-inline-start: 6px ;
     white-space: nowrap;
     display: inline;
 }
 
+
 .list-item-delete-button {
     position: absolute;
-    right: 0px;
+    inset-inline-end: 0px;
     top: 0px;
     font-size: 11px ;
     color: #555555 ;
@@ -79,6 +75,7 @@
     padding: 2px 2px 4px 2px;
     border: 1px solid transparent;
     z-index: 100;
+    background-color: unset;
 }
 
 .list-item-delete-button:hover {
@@ -96,14 +93,40 @@
     border-bottom: 1px solid #e4e4e4;
 }
 
+.silky-option-list-filler {
+    grid-column-end: -1 !important;
+    grid-row-end: -1 !important;
+    height: min-content;
+}
+
+.list-info-box {
+    inset-inline-start: 10px;
+    display: flex;
+    gap: 5px;
+    align-items: center;
+    background-color: rgba(181, 202, 239, 0.41);
+    padding: 10px;
+    margin: 10px;
+}
+
+.list-info-box .info-icon {
+    -webkit-mask-image: url('../assets/action-info.svg');
+    background-color: #81B2F5;
+    mask-size: contain;
+    mask-position: center;
+    mask-repeat: no-repeat;
+    height: 17px;
+    width: 17px;
+}
+
 .silky-option-list.multi-item:not(.silky-target-list) > .silky-layout-cell:not(.silky-option-list-filler).selected {
     background-color: transparent;
-    border-left: 4px solid rgb(46,138,199);
+    border-inline-start: 4px solid rgb(46,138,199);
 }
 
 .silky-option-list.multi-item:not(.silky-target-list) > .silky-layout-cell:not(.silky-option-list-filler) {
     border-radius: 0px;
-    border-left: 4px solid transparent;
+    border-inline-start: 4px solid transparent;
     border-bottom: 1px solid #eaeaea;
 }
 

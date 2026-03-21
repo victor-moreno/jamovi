@@ -6,17 +6,19 @@
 }
 
 .jmv-ribbon-appmenu-menu-panel {
-    position: fixed ;
+    position: fixed;
     display: flex;
-    right: -1px ;
-    top: 0px ;
+    inset-inline-end: -1px;
+    top: 0px;
     width: 0px;
+    visibility: hidden;
     bottom: 0px;
-    background-color: #F4F4F4 ;
-    color: #555555 ;
-    margin: 0 ;
-    transition: .15s width ease-out;
-    border-left: 1px solid #D0D0D0;
+    background-color: #F4F4F4;
+    color: #555555;
+    margin: 0;
+    transition: .15s width ease-out, .15s visibility ease-out;
+    border-inline-start: 1px solid #D0D0D0;
+    filter: drop-shadow(0px 0px 5px #00000066);
 }
 
 body.windows.electron .jmv-ribbon-appmenu-menu-panel {
@@ -24,7 +26,8 @@ body.windows.electron .jmv-ribbon-appmenu-menu-panel {
 }
 
 .jmv-ribbon-appmenu-menu-panel.activated {
-    width: 250px;
+    width: 280px;
+    visibility: visible;
 }
 
 .jmv-ribbon-appmenu-menu {
@@ -32,7 +35,7 @@ body.windows.electron .jmv-ribbon-appmenu-menu-panel {
     overflow: hidden;
     margin: 0 ;
     font-size: 70% ;
-    text-align: left ;
+    text-align: start ;
     flex-direction: column;
     min-width: 250px;
 }
@@ -46,7 +49,7 @@ body.windows.electron .jmv-ribbon-appmenu-menu-panel {
 
 .jmv-ribbon-appmenu-icon {
     width: 45px;
-    background-image: url('../assets/logo-v-naked.svg');
+    background-image: url('../../assets/logo-v-naked.svg');
     background-size: 30px;
     background-repeat: no-repeat;
     background-position: center;
@@ -67,21 +70,26 @@ body.windows.electron .jmv-ribbon-appmenu-menu-panel {
     height: 30px;
     width: 30px;
     box-sizing: border-box;
+    padding: 0;
+    border: none;
 }
 
 .jmv-ribbon-appmenu-back-button:hover > div {
     background-color: #888888 ;
 }
 
+body[dir="ltr"] .jmv-ribbon-appmenu-back-button > div {
+    transform: rotate(180deg);
+}
+
 .jmv-ribbon-appmenu-back-button > div {
     flex: 1;
-    mask: url('../assets/action-back.svg') 0 0/25px 25px no-repeat;
+    mask: url('../../assets/action-back.svg') 0 0/25px 25px no-repeat;
     background-color: #333333;
-    -webkit-mask: url('../assets/action-back.svg');
+    -webkit-mask: url('../../assets/action-back.svg');
     -webkit-mask-repeat: no-repeat;
     -webkit-mask-position: center;
     -webkit-mask-size: 25px;
-    transform: rotate(180deg);
     min-width: 25px;
     height: 25px;
 }
@@ -100,6 +108,7 @@ body.windows.electron .jmv-ribbon-appmenu-menu-panel {
     justify-content: space-between;
     align-items: center;
     padding: 6px 16px ;
+    gap: 10px
 }
 
 .jmv-ribbon-appmenu-item.checkbox:hover,
@@ -118,7 +127,7 @@ body.windows.electron .jmv-ribbon-appmenu-menu-panel {
 }
 
 input[type="checkbox"].jmv-ribbon-appmenu-checkbox {
-    margin-right: 0px;
+    margin-inline-end: 0px;
 }
 
 .jmv-ribbon-appmenu-list {
@@ -140,8 +149,8 @@ input[type="checkbox"].jmv-ribbon-appmenu-checkbox {
 }
 
 .jmv-ribbon-appmenu-zoomlevel {
-    margin-left: 8px ;
-    margin-right: 8px ;
+    margin-inline-start: 8px ;
+    margin-inline-end: 8px ;
 }
 
 .jmv-ribbon-appmenu-zoomin,
@@ -150,6 +159,8 @@ input[type="checkbox"].jmv-ribbon-appmenu-checkbox {
     width: 30px ;
     border-radius: 1px ;
     text-align: center ;
+    padding: 0;
+    box-sizing: content-box;
 }
 
 .jmv-ribbon-appmenu-zoomin:hover,
@@ -169,11 +180,15 @@ input[type="checkbox"].jmv-ribbon-appmenu-checkbox {
     line-height: 45px;
 }
 
-:not(body.electron) .jmv-update-info,
-:not(body.electron) .jmv-recorder,
-:not(body.electron) .jmv-devmode,
-:not(body.electron) .jmv-zoom,
-:not(body.electron) .jmv-ribbon-appmenu-version,
-:not(body.electron) .jmv-language-selector {
+body:not(.electron) .jmv-update-info,
+body:not(.electron) .jmv-recorder,
+body:not(.electron) .jmv-devmode,
+body:not(.electron) .jmv-zoom,
+body:not(.electron) .jmv-ribbon-appmenu-version,
+body:not(.electron) .jmv-language-selector {
     display: none ;
+}
+
+.jmv-ribbon-appmenu .loading {
+    content: url('../../assets/indicator-running.svg')
 }

@@ -31,6 +31,7 @@ from asyncio import FIRST_COMPLETED
 from asyncio import current_task
 
 from .utils import req_str
+from .i18n import _
 
 
 MESSAGE_COMPLETE = MessageStatus.Value('COMPLETE')
@@ -63,6 +64,9 @@ class Engine:
         self._conn_root = conn_root
         self._config = config
         self._monitor = monitor
+
+        allow_arbitrary_code = config.get('allow_arbitrary_code', 'true')
+        self._allow_arbitrary_code = not (allow_arbitrary_code == 'false' or allow_arbitrary_code == '0')
 
         self._conn_path = None
         self._process = None
@@ -116,12 +120,17 @@ class Engine:
         env['R_LIBS'] = self._config.get('r_libs', env.get('R_LIBS', ''))
         env['FONTCONFIG_PATH'] = self._config.get('fontconfig_path', env.get('FONTCONFIG_PATH', ''))
         env['JAMOVI_MODULES_PATH'] = self._config.get('modules_path', env.get('JAMOVI_MODULES_PATH', ''))
+        env['PATH'] = self._config.get('path', env.get('PATH', ''))
 
         if platform.uname().system == 'Linux':
             # plotting under linux sometimes doesn't work without this
             env['LC_ALL'] = 'en_US.UTF-8'
             # https://github.com/jamovi/jamovi/issues/801
             # https://github.com/jamovi/jamovi/issues/831
+
+        elif platform.uname().system == 'Windows':
+            # lubridate doesn't work without this
+            env['TZDIR'] = f'{ env["R_HOME"] }\\share\\zoneinfo'
 
         con = '--con={}'.format(self._conn_path)
         pth = '--path={}'.format(self._data_path)
@@ -138,7 +147,8 @@ class Engine:
                     startupinfo=si,
                     stdout=None,  # stdouts seem to break things on windows
                     stderr=None,
-                    env=env)
+                    env=env,
+                    cwd=exe_dir)  # set the cwd to prevent picking up stray .dlls
             else:
                 # stdin=PIPE, because the engines use the closing of
                 # stdin to terminate themselves.
@@ -259,6 +269,13 @@ class Engine:
 
     async def run(self, request, results_stream):
 
+        if request.arbitraryCode and not self._allow_arbitrary_code:
+            error = self._create_error_response(
+                request,
+                _('Analyses which execute arbitrary code are not permitted in this session.'))
+            results_stream.set_result(error)
+            return
+
         if self._current_analysis is not None and not self._current_analysis.done():
             self._current_analysis.cancel()
 
@@ -321,9 +338,7 @@ class Engine:
 
                     error = self._create_error_response(
                         request,
-                        '''
-                        This analysis has exceeded the current time limits and has been terminated.
-                        ''')
+                        _('This analysis has exceeded the current time limits and has been terminated.'))
                     await self.stop()
                     results_stream.set_result(error)
                     await self.restart()
@@ -335,9 +350,7 @@ class Engine:
 
                     error = self._create_error_response(
                         request,
-                        '''
-                        This analysis has terminated, likely due to hitting a resource limit.
-                        ''')
+                        _('This analysis has terminated, likely due to hitting a resource limit.'))
                     results_stream.set_result(error)
                     await self.restart()
                     break

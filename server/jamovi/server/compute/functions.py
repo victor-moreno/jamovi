@@ -3,6 +3,8 @@ import random
 import math
 from numbers import Number as num
 import statistics as stats
+from datetime import datetime
+from datetime import timezone
 
 from numpy import quantile
 from scipy.stats import boxcox
@@ -17,6 +19,7 @@ from jamovi.server.compute import is_equal
 from .funcmeta import row_wise
 from .funcmeta import column_wise
 from .funcmeta import column_wise_no_group_by
+from .funcmeta import row_wise_with_group_by
 from .funcmeta import returns
 from .funcmeta import levels
 
@@ -141,23 +144,30 @@ def BETA(index, alpha: float = 1.0, beta: float = 1.0):
 @returns(DataType.INTEGER, MeasureType.ORDINAL)
 def MATCH(index, needle, *haystack):
     if is_missing(needle):
-        -2147483648
+        return -2147483648
     for index, value in enumerate(haystack):
         if is_equal(needle, value):
             return index + 1
-    else:
-        return -2147483648
+    return -2147483648
 
 
 @row_wise
 @returns(DataType.INTEGER, MeasureType.NOMINAL, range(1, 10000))
 @levels(range(1, 10000))
-def HLOOKUP(index, lookup_index: int, *args):
+def HLOOKUP(index, lookup_index: int, *args, ignore_missing: int = 0):
     lookup_index -= 1  # was indexed from 1
-    if lookup_index >= 0 and lookup_index < len(args):
-        return args[lookup_index]
-    else:
+    if lookup_index < 0 or lookup_index >= len(args):
         return -2147483648
+    if ignore_missing == 0:
+        return args[lookup_index]
+    arg_i = 0
+    for v in args:
+        if is_missing(v):
+            continue
+        if arg_i == lookup_index:
+            return v
+        arg_i += 1
+    return -2147483648
 
 
 @row_wise
@@ -245,6 +255,17 @@ def VMED(values: float):
 
 
 @column_wise
+def VMAD(values: float):
+    median = VMED(values)
+    return VMED(map(lambda v: abs(v - median), values))
+
+
+@column_wise
+def VMADR(values: float):
+    return VMAD(values)*1.4826
+
+
+@column_wise
 def VMODE(values: float):
     values = filter(lambda x: not math.isnan(x), values)
     return stats.mode(values)
@@ -291,15 +312,17 @@ def VBOXCOXLAMBDA(values: float):
 
 @row_wise
 def BOXCOX(index, x: float, lmbda: float = VBOXCOXLAMBDA):
-    if lmbda > 0:
-        return (x ** lmbda - 1) / lmbda
+    if x < 0:
+        return NaN
+    elif x == 0 and lmbda < 0:
+        return float('-inf')
     elif lmbda == 0:
         return math.log(x)
     else:
-        return NaN
+        return (x ** lmbda - 1) / lmbda
 
 
-@row_wise
+@row_wise_with_group_by
 def Z(index, x: float):
     # see the transfudgifier
     return x
@@ -317,7 +340,7 @@ def MAXABSZ(index, x: float):
     return x
 
 
-@row_wise
+@row_wise_with_group_by
 def SCALE(index, x: float):
     # see the transfudgifier
     return x
@@ -346,6 +369,13 @@ def IFMISS(index, cond, x=1, y=-2147483648):
 
 
 @row_wise
+@returns(DataType.INTEGER, MeasureType.NOMINAL)
+def _FILTER(index, cond: int):
+    # this is used by filters
+    return 0 if is_missing(cond, empty_str_is_missing=True) else cond
+
+
+@row_wise
 @returns(DataType.INTEGER, MeasureType.NOMINAL, 0)
 def NOT(index, x):
     if is_missing(x):
@@ -365,6 +395,18 @@ def FILTER(index, x, *conds: int):
 
 
 @row_wise
+@returns(DataType.INTEGER, MeasureType.CONTINUOUS)
+def DATEVALUE(_, x: str, fmt: str = '%Y-%m-%d'):
+    return int(datetime.strptime(x, fmt).replace(tzinfo=timezone.utc).timestamp() // 60 // 60 // 24)
+
+
+@row_wise
+@returns(DataType.TEXT, MeasureType.ORDINAL)
+def DATE(_, x: int, fmt: str = '%Y-%m-%d'):
+    return datetime.fromtimestamp(x * 60 * 60 * 24, timezone.utc).strftime(fmt)
+
+
+@row_wise
 @returns(DataType.TEXT, MeasureType.NOMINAL)
 def TEXT(index, x: str):
     return x
@@ -376,6 +418,16 @@ def VALUE(index, x: str):
         return float(x)
     except ValueError:
         return NaN
+
+
+@row_wise
+@returns(DataType.INTEGER, MeasureType.CONTINUOUS)
+def COUNT(index, *args):
+    c = 0
+    for v in args:
+        if not is_missing(v):
+            c += 1
+    return c
 
 
 @row_wise

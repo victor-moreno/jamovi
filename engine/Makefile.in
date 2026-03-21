@@ -4,6 +4,7 @@
 PREFIX=%PREFIX%
 LIBDIR=%LIBDIR%
 CFLAGS=%CFLAGS%
+MFLAGS=%MFLAGS%
 CXXFLAGS=%CXXFLAGS%
 
 ifneq (%R_PATH%,)
@@ -16,6 +17,10 @@ endif
 
 ifneq (%R_HOME%,)
 R_HOME=%R_HOME%
+endif
+
+ifneq (%LIBDIR%,)
+LIBDIR=%LIBDIR%
 endif
 
 ifeq ($(OS),Windows_NT)
@@ -50,7 +55,7 @@ ifeq ($(os),OSX)
 				-lboost_filesystem \
 				-lboost_system \
 				-framework Foundation
-	MFLAGS = -mmacosx-version-min=10.13
+	MFLAGS += -mmacosx-version-min=10.13
 	CXXFLAGS += $(MFLAGS)
 else
 ifeq ($(os),Linux)
@@ -63,7 +68,8 @@ ifeq ($(os),Linux)
 				-lboost_filesystem \
 				-lboost_system \
 				-lpthread \
-				$(foreach rp,$(R_PATH),-Wl,-rpath,'$(rp)')
+				$(foreach rp,$(R_PATH),-Wl,-rpath,'$(rp)') \
+				$(foreach p,$(LIBDIR),-L$(p))
 else
 	BINDIR ?= bin
 	R_HOME ?= $(SRCDIR)/../../../Frameworks/R

@@ -28,6 +28,7 @@ DataSetW *DataSetW::create(MemoryMapW *mm)
     dss->scratch = NULL;
     dss->rowCountExFiltered = 0;
     dss->indices = NULL;
+    dss->weights = 0;
 
     // add the filter indices column
     ColumnStruct *col = mm->allocateBase<ColumnStruct>();
@@ -324,15 +325,14 @@ void DataSetW::deleteRows(int delStart, int delEnd)
         else if (column.dataType() == DataType::TEXT &&
                  column.measureType() == MeasureType::ID)
         {
-             for (int j = delStart; j < finalCount; j++)
-             {
-                 int from = j + delCount;
-                 int to = j;
-                 const char* value = column.raws(from);
-                 column.setSValue(to, value);
-             }
+            for (int j = delStart; j < finalCount; j++)
+            {
+                int from = j + delCount;
+                int to = j;
+                column.cellAt<char*>(to) = column.cellAt<char*>(from);
+            }
 
-             column.setRowCount<char*>(finalCount);
+            column.setRowCount<char*>(finalCount);
         }
         else
         {
@@ -487,4 +487,32 @@ void DataSetW::discardScratchColumn(int id)
     scratch = _mm->resolve(scratch);
     if (scratch->id == id)
         scratch->id = -1;
+}
+
+bool DataSetW::hasWeights()
+{
+    DataSetStruct *dss = _mm->resolve<DataSetStruct>(_rel);
+
+    if (dss->weights < 1)
+        return false;
+
+    try
+    {
+        getColumnById(dss->weights);
+        return true;
+    }
+    catch (runtime_error)
+    {
+        return false;
+    }
+}
+
+int DataSetW::weights()
+{
+    return _mm->resolve<DataSetStruct>(_rel)->weights;
+}
+
+void DataSetW::setWeights(int id)
+{
+    _mm->resolve<DataSetStruct>(_rel)->weights = id;
 }

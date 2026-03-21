@@ -1,53 +1,43 @@
 <!DOCTYPE html>
-<html>
+<html aria-label="jamovi">
 <head>
     <meta charset="utf-8" />
     <title>jamovi</title>
-    <link href="../main.css" type="text/css" rel="stylesheet">
+    <link href="main/main.css" type="text/css" rel="stylesheet">
     <script>
         if (window.customElements === undefined)
             window.location.href = "https://www.jamovi.org/misc/unsupported.html";
     </script>
     <script src="../config.js" type="text/javascript"></script>
-    <script src="../main.js"   type="text/javascript"></script>
-
-    <script>
-        if ( ! window.location.port) {
-            var optionsUrl = window.location.protocol + '//a.' + window.location.hostname;
-            var resultsUrl = window.location.protocol + '//r.' + window.location.hostname;
-            document.write('<link rel="prefetch" href="' + optionsUrl + '/analysisui.js">');
-            document.write('<link rel="prefetch" href="' + optionsUrl + '/analysisui.css">');
-            document.write('<link rel="prefetch" href="' + resultsUrl + '/resultsview.js">');
-            document.write('<link rel="prefetch" href="' + resultsUrl + '/resultsview.css">');
-        }
-    </script>
-
+    <script src="main/main.ts" type="module"></script>
 </head>
 
-<body data-table-mode="spreadsheet" data-splitpanel-mode="mixed">
-    <div id="backstage"></div>
+<body role="application" data-table-mode="spreadsheet" data-splitpanel-mode="mixed" accessible="false" focusMode="default" id="main-window">
+    <!--<div id="backstage" role="menu" aria-label="File" aria-orientation="vertical"></div>-->
 
-    <div id="header">
-        <div id="header-text" class="app-dragable">jamovi<span class="header-file-name"></span></div>
-        <div id="header-buttons">
-            <div id="min-button" class="header-button">
-                <div class="header-button-icon"></div>
-            </div>
-            <div id="max-button" class="header-button">
-                <div class="header-button-icon"></div>
-            </div>
-            <div id="close-button" class="header-button">
-                <div class="header-button-icon"></div>
+    <div id="main" role="presentation">
+        <div id="header" aria-hidden="true">
+            <div id="header-text" class="app-dragable">jamovi<span class="header-file-name"></span></div>
+            <div id="header-buttons" dir="ltr">
+                <div id="min-button" class="header-button">
+                    <div class="header-button-icon"></div>
+                </div>
+                <div id="max-button" class="header-button">
+                    <div class="header-button-icon"></div>
+                </div>
+                <div id="close-button" class="header-button">
+                    <div class="header-button-icon"></div>
+                </div>
             </div>
         </div>
-    </div>
 
-    <div class="silky-ribbon">
-    </div>
-
-    <div id="main-view">
-        <div id="variable-editor" class="hidden">
+        <div class="silky-ribbon" role="toolbar" aria-label="Ribbon" aria-orientation="horizontal">
         </div>
+
+        <jmv-splitpanel id="main-view" role="main" aria-label="Workspace">
+            <jmv-variable-editor id="variable-editor" class="hidden jmv-variable-editor" role="menu" aria-label="variable editor">
+            </jmv-variable-editor>
+        </jmv-splitpanel>
     </div>
 
     <div id="progress-bar">

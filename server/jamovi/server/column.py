@@ -1,6 +1,8 @@
 
 import ast
 import re
+from collections import namedtuple
+from typing import Iterable
 
 from jamovi.core import ColumnType
 from jamovi.core import MeasureType
@@ -20,7 +22,7 @@ from .compute import FValues
 from .compute import convert
 from .compute import is_missing
 
-from collections import namedtuple
+from .i18n import _
 
 
 NaN = float('nan')
@@ -93,6 +95,14 @@ class Column:
                 return Column.Cell(value, False)
             else:
                 return value
+
+    def get_values(self, index: int, n_rows: int) -> Iterable:
+        assert self._child is not None
+        return self._child.get_values(index, n_rows)
+
+    def set_values(self, index: int, values: Iterable, initing=False):
+        assert self._child is not None
+        return self._child.set_values(index, values, initing)
 
     def is_row_filtered(self, index):
         return self._parent.is_row_filtered(index)
@@ -377,10 +387,10 @@ class Column:
             self._create_child()
         self._child.append(value)
 
-    def insert_level(self, raw, label, importValue=None, pinned=False):
+    def insert_level(self, raw, label, import_value=None, pinned=False):
         if self._child is None:
             self._create_child()
-        self._child.insert_level(raw, label, importValue, pinned)
+        self._child.insert_level(raw, label, import_value, pinned)
 
     def get_label(self, value):
         if self._child is None:
@@ -427,7 +437,7 @@ class Column:
             return self._child.has_level(index_or_name)
         return False
 
-    def get_levels(self, row_count):
+    def get_levels(self, row_count, filt=False):
         return self.levels
 
     @property
@@ -581,7 +591,7 @@ class Column:
         self._child.clear_levels()
 
         if self._node is not None and self._node.has_levels:
-            for level in self._node.get_levels(self.row_count):
+            for level in self._node.get_levels(self.row_count, self.uses_column_formula):
                 self._child.append_level(level[0], level[1])
 
         if self.data_type is DataType.DECIMAL:
@@ -668,15 +678,8 @@ class Column:
                 else:
                     node = ast.Call(
                         # if missing, treat as 0 (false)
-                        func=ast.Name(id='IFMISS', ctx=ast.Load()),
-                        args=[
-                            node,
-                            ast.Num(0),
-                            ast.Call(
-                                # convert value to int
-                                func=ast.Name(id='INT', ctx=ast.Load()),
-                                args=[ node ],
-                                keywords=[ ]) ],
+                        func=ast.Name(id='_FILTER', ctx=ast.Load()),
+                        args=[ node ],
                         keywords=[ ])
 
                 # here we determine the parent filters
